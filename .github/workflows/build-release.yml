@@ -1,0 +1,105 @@
+name: Build and Draft Release (manual only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Comma-separated: windows,linux,macos-intel,macos-arm64 (default windows)'
+        required: false
+        type: string
+        default: 'windows'
+      release_version:
+        description: 'Release tag, e.g. v1.0.6 (required to create draft release)'
+        required: false
+        type: string
+      release_notes:
+        description: 'Release notes'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows
+            asset_name: ajons-uploader-windows-x64.exe
+          - os: ubuntu-latest
+            target: linux
+            asset_name: ajons-uploader-linux-x64
+          - os: macos-15-intel
+            target: macos-intel
+            asset_name: ajons-uploader-macos-intel
+          - os: macos-latest
+            target: macos-arm64
+            asset_name: ajons-uploader-macos-arm64
+    runs-on: ${{ matrix.os }}
+    if: contains(github.event.inputs.platforms || 'windows', matrix.target)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Python
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: '3.12'
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller==6.11.1 keyring
+      - name: Build with PyInstaller
+        run: python -m PyInstaller uploader/ajons-uploader.spec --clean
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          if [ "${{ matrix.target }}" = "windows" ]; then
+            cp dist/ajons-uploader.exe artifacts/${{ matrix.asset_name }}
+          else
+            cp dist/ajons-uploader artifacts/${{ matrix.asset_name }}
+          fi
+          (cd artifacts && sha256sum "${{ matrix.asset_name }}" > "${{ matrix.asset_name }}.sha256")
+      - name: Upload artifact
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: ${{ matrix.asset_name }}
+          path: artifacts/
+          retention-days: 30
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event.inputs.release_version != ''
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create checksums manifest
+        shell: bash
+        run: |
+          cd dist
+          : > SHA256SUMS
+          for f in ajons-uploader-windows-x64.exe ajons-uploader-linux-x64 ajons-uploader-macos-intel ajons-uploader-macos-arm64; do
+            [ -f "$f" ] && sha256sum "$f" >> SHA256SUMS || true
+          done
+          [ -s SHA256SUMS ]
+          sha256sum -c SHA256SUMS
+      - name: Create DRAFT release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          VERSION="${{ github.event.inputs.release_version }}"
+          FILES=(dist/SHA256SUMS)
+          for f in ajons-uploader-windows-x64.exe ajons-uploader-linux-x64 ajons-uploader-macos-intel ajons-uploader-macos-arm64; do
+            [ -f "dist/$f" ] && FILES+=("dist/$f")
+          done
+          gh release create "$VERSION" --title "Ajons Uploader $VERSION" --notes "${{ github.event.inputs.release_notes || 'Draft release - review before publishing' }}" --draft --target "${{ github.sha }}" "${FILES[@]}"

@@ -103,7 +103,7 @@ jobs:
       attestations: write
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           merge-multiple: true
@@ -129,6 +129,6 @@ jobs:
           done
           gh release create "$VERSION" --title "Ajons Uploader $VERSION" --notes "${{ github.event.inputs.release_notes || 'Draft release - review before publishing' }}" --draft --target "${{ github.sha }}" "${FILES[@]}"
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@62fc1d596301d0ab9914e1fec14dc5c8d93f65cd # v3.2.0
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
         with:
           subject-path: dist/*

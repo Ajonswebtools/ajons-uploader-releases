@@ -33,25 +33,30 @@ jobs:
           PLATFORMS="${{ github.event.inputs.platforms || 'windows' }}"
           # Trim spaces and split by comma
           PLATFORMS=$(echo "$PLATFORMS" | sed 's/ //g')
-          # Build matrix JSON
+          # Default to windows if empty
+          if [ -z "$PLATFORMS" ]; then
+            PLATFORMS="windows"
+          fi
+          # Build matrix JSON with jq -c for compact single-line output
           MATRIX='{"include":[]}'
           IFS=',' read -ra PLATFORMS_ARRAY <<< "$PLATFORMS"
           for P in "${PLATFORMS_ARRAY[@]}"; do
             case "$P" in
               windows)
-                MATRIX=$(echo "$MATRIX" | jq '.include += [{"os": "windows-latest", "target": "windows", "asset_name": "ajons-uploader-windows-x64.exe"}]')
+                MATRIX=$(echo "$MATRIX" | jq -c '.include += [{"os": "windows-latest", "target": "windows", "asset_name": "ajons-uploader-windows-x64.exe"}]')
                 ;;
               linux)
-                MATRIX=$(echo "$MATRIX" | jq '.include += [{"os": "ubuntu-latest", "target": "linux", "asset_name": "ajons-uploader-linux-x64"}]')
+                MATRIX=$(echo "$MATRIX" | jq -c '.include += [{"os": "ubuntu-latest", "target": "linux", "asset_name": "ajons-uploader-linux-x64"}]')
                 ;;
               macos-intel)
-                MATRIX=$(echo "$MATRIX" | jq '.include += [{"os": "macos-15-intel", "target": "macos-intel", "asset_name": "ajons-uploader-macos-intel"}]')
+                MATRIX=$(echo "$MATRIX" | jq -c '.include += [{"os": "macos-15-intel", "target": "macos-intel", "asset_name": "ajons-uploader-macos-intel"}]')
                 ;;
               macos-arm64)
-                MATRIX=$(echo "$MATRIX" | jq '.include += [{"os": "macos-latest", "target": "macos-arm64", "asset_name": "ajons-uploader-macos-arm64"}]')
+                MATRIX=$(echo "$MATRIX" | jq -c '.include += [{"os": "macos-latest", "target": "macos-arm64", "asset_name": "ajons-uploader-macos-arm64"}]')
                 ;;
               *)
-                echo "Warning: unknown platform '$P', skipping"
+                echo "Error: unknown platform '$P'" >&2
+                exit 1
                 ;;
             esac
           done

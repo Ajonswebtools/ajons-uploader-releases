@@ -31,13 +31,10 @@ jobs:
         id: set-matrix
         run: |
           PLATFORMS="${{ github.event.inputs.platforms || 'windows' }}"
-          # Trim spaces and split by comma
           PLATFORMS=$(echo "$PLATFORMS" | sed 's/ //g')
-          # Default to windows if empty
           if [ -z "$PLATFORMS" ]; then
             PLATFORMS="windows"
           fi
-          # Build matrix JSON with jq -c for compact single-line output
           MATRIX='{"include":[]}'
           IFS=',' read -ra PLATFORMS_ARRAY <<< "$PLATFORMS"
           for P in "${PLATFORMS_ARRAY[@]}"; do
@@ -112,6 +109,17 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Verify downloaded artifacts exist and have expected names
+        shell: bash
+        run: |
+          cd dist
+          for f in ajons-uploader-windows-x64.exe ajons-uploader-linux-x64 ajons-uploader-macos-intel ajons-uploader-macos-arm64; do
+            if [ ! -f "$f" ] || [ ! -s "$f" ]; then
+              echo "Error: $f missing or empty in dist/"
+              exit 1
+            fi
+            echo "OK: $f ($(stat -c%s $f) bytes)"
+          done
       - name: Create checksums manifest
         shell: bash
         run: |
@@ -120,19 +128,30 @@ jobs:
           for f in ajons-uploader-windows-x64.exe ajons-uploader-linux-x64 ajons-uploader-macos-intel ajons-uploader-macos-arm64; do
             [ -f "$f" ] && sha256sum "$f" >> SHA256SUMS || true
           done
-          [ -s SHA256SUMS ]
+          [ -s SHA256SUMS ] || { echo "Error: SHA256SUMS empty"; exit 1; }
           sha256sum -c SHA256SUMS
       - name: Create DRAFT release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
           VERSION="${{ github.event.inputs.release_version }}"
+          # Fail if tag already exists
+          if gh release view "$VERSION" --repo "$GH_REPO" >/dev/null 2>&1; then
+            echo "Error: Release $VERSION already exists"
+            exit 1
+          fi
           FILES=(dist/SHA256SUMS)
           for f in ajons-uploader-windows-x64.exe ajons-uploader-linux-x64 ajons-uploader-macos-intel ajons-uploader-macos-arm64; do
             [ -f "dist/$f" ] && FILES+=("dist/$f")
           done
-          gh release create "$VERSION" --title "Ajons Uploader $VERSION" --notes "${{ github.event.inputs.release_notes || 'Draft release - review before publishing' }}" --draft --target "${{ github.sha }}" "${FILES[@]}"
+          gh release create "$VERSION" \
+            --title "Ajons Uploader $VERSION" \
+            --notes "${{ github.event.inputs.release_notes || 'Draft release - review before publishing' }}" \
+            --draft \
+            --target "${{ github.sha }}" \
+            "${FILES[@]}"
       - name: Attest build provenance
         uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
         with:

@@ -21,7 +21,7 @@ from typing import Any, Callable, Optional
 
 import keyring
 import httpx
-from security_redaction import redact_text
+from tools.security_redaction import redact_text
 
 from tools.ajons_constants import (
     BASE_URL,

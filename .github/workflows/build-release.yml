@@ -24,6 +24,8 @@ jobs:
   # Parse platforms input and generate matrix
   setup:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
@@ -77,15 +79,16 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pyinstaller==6.11.1 keyring
       - name: Build with PyInstaller
-        run: python -m PyInstaller uploader/ajons-uploader.spec --clean
+        working-directory: uploader
+        run: python -m PyInstaller ajons-uploader.spec --clean
       - name: Prepare artifact
         shell: bash
         run: |
           mkdir -p artifacts
           if [ "${{ matrix.target }}" = "windows" ]; then
-            cp dist/ajons-uploader.exe artifacts/${{ matrix.asset_name }}
+            cp uploader/dist/ajons-uploader.exe artifacts/${{ matrix.asset_name }}
           else
-            cp dist/ajons-uploader artifacts/${{ matrix.asset_name }}
+            cp uploader/dist/ajons-uploader artifacts/${{ matrix.asset_name }}
           fi
           (cd artifacts && sha256sum "${{ matrix.asset_name }}" > "${{ matrix.asset_name }}.sha256")
       - name: Upload artifact

@@ -90,6 +90,9 @@ jobs:
           else
             EXE="dist/ajons-uploader"
           fi
+          # Test executable runs at all
+          echo "Testing $EXE runs..."
+          "$EXE" --version 2>&1 || true
           # Test --version
           echo "Testing $EXE --version"
           VERSION_OUTPUT=$("$EXE" --version 2>&1)

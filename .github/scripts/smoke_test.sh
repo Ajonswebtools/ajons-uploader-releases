@@ -51,9 +51,9 @@ PY
 # --allow-insecure-file. On Linux CI there is no keyring, so keep
 # --allow-insecure-file. Never print secrets/tokens to logs.
 if [ "$PLATFORM" = "linux" ]; then
-  SERVE_ARGS=(--allow-insecure-file)
+  SERVE_EXTRA="--allow-insecure-file"
 else
-  SERVE_ARGS=()
+  SERVE_EXTRA=""
   echo "=== keyring read/write (same code path as daemon; dummy secret only) ==="
   python3 - <<'PY'
 import keyring
@@ -67,7 +67,7 @@ PY
 fi
 
 echo "=== serve (stays running 10s) ==="
-"$EXE" serve --concurrency 1 "${SERVE_ARGS[@]}" > serve.log 2>&1 &
+"$EXE" serve --concurrency 1 $SERVE_EXTRA > serve.log 2>&1 &
 SERVE_PID=$!
 sleep 10
 if ! kill -0 "$SERVE_PID" 2>/dev/null; then

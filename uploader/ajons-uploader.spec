@@ -2,19 +2,22 @@
 import sys
 import os
 
-# Resolve uploader directory from spec file location
-SPECPATH = os.path.dirname(os.path.abspath(__file__))
-UPLOADER_DIR = os.path.join(SPECPATH, '..', 'uploader')
-UPLOADER_DIR = os.path.normpath(UPLOADER_DIR)
+# When building from releases repo root, uploader dir is at ./uploader
+# When building from uploader repo root, uploader dir is at .
+# Detect which case we're in by checking if 'tools' package exists in current dir
+if os.path.isdir('tools'):
+    UPLOADER_DIR = '.'
+else:
+    UPLOADER_DIR = 'uploader'
 
 # Ensure uploader directory is on Python path for module discovery
-sys.path.insert(0, UPLOADER_DIR)
+sys.path.insert(0, os.path.abspath(UPLOADER_DIR))
 
 block_cipher = None
 
 a = Analysis(
     ['ajons_uploader_cli.py'],
-    pathex=[UPLOADER_DIR],
+    pathex=[os.path.abspath(UPLOADER_DIR)],
     binaries=[],
     datas=[('security_redaction.py', '.')],
     hiddenimports=[

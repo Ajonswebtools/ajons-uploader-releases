@@ -40,8 +40,8 @@ from tools.ajons_utils import (
 )
 
 
-DAEMON_VERSION = "1.1.1"
-UPLOADER_VERSION = "1.1.1"
+DAEMON_VERSION = "1.1.2"
+UPLOADER_VERSION = "1.1.2"
 DAEMON_SOCKET_NAME = "ajons-uploader.sock"
 DAEMON_INFO_FILE = "daemon.json"
 DAEMON_LOCK_FILE = "daemon.lock"
@@ -484,14 +484,22 @@ class UploadQueue:
         if not token:
             raise UploadError("No valid device credential; re-pair required")
 
-        claim_resp = _json_request_with_token("POST", f"/uploads/{job.session_id}/claim", {}, token)
+        job.status = "uploading"
+        path = Path(job.file_path)
+        size = path.stat().st_size
+        claim_resp = await _json_request_with_token("POST", f"/uploads/{job.session_id}/claim",
+                                                    {"declared_size": size}, token)
         uri = claim_resp["upload_uri"]
         access_token = claim_resp["access_token"]
         google_expiry = time.monotonic() + int(claim_resp.get("expires_in", 3600))
 
-        job.status = "uploading"
-        path = Path(job.file_path)
-        size = path.stat().st_size
+        # D5: Compare local file size with session total_bytes from the server
+        # before sending any bytes. Reject at once on mismatch.
+        server_total = claim_resp.get("total_bytes")
+        if server_total is not None and int(server_total) != size:
+            raise UploadError(
+                "Session size mismatch: local %d, server %d" % (size, int(server_total)))
+
         job.total_bytes = size
 
         position = _probe_with_token(uri, access_token, size)
@@ -502,9 +510,8 @@ class UploadQueue:
             job.status = "done"
             job.completed_at = time.monotonic()
             job.bytes_uploaded = size
-            _complete_with_token(job.session_id, job.video_id, token)
+            await _complete_with_token(job.session_id, job.video_id, token)
             return
-
         job.bytes_uploaded = offset
 
         with path.open("rb") as f:
@@ -513,7 +520,7 @@ class UploadQueue:
                     token = await self._token_manager.ensure_valid_token()
                     if not token:
                         raise UploadError("Lost device credential during upload")
-                    renewed = _json_request_with_token("POST", f"/uploads/{job.session_id}/renew", {}, token)
+                    renewed = await _json_request_with_token("POST", f"/uploads/{job.session_id}/renew", {}, token)
                     access_token = renewed["access_token"]
                     google_expiry = time.monotonic() + int(renewed.get("expires_in", 3600))
 
@@ -521,7 +528,11 @@ class UploadQueue:
                 chunk = f.read(min(CHUNK, size - offset))
                 end = offset + len(chunk) - 1
 
-                status, headers, body = _request(
+                # D6: Run the blocking HTTP request in a thread so the daemon
+                # event loop stays responsive to status requests during long
+                # chunk uploads (timeout=180 would otherwise block for 3 min).
+                status, headers, body = await asyncio.to_thread(
+                    _request,
                     "PUT", uri, bearer=access_token, data=chunk, headers={
                         "Content-Length": str(len(chunk)),
                         "Content-Range": f"bytes {offset}-{end}/{size}",
@@ -540,7 +551,7 @@ class UploadQueue:
                         job.status = "done"
                         job.completed_at = time.monotonic()
                         job.bytes_uploaded = size
-                        _complete_with_token(job.session_id, video_id, token)
+                        await _complete_with_token(job.session_id, video_id, token)
                         return
 
                 if status == 308:
@@ -551,7 +562,7 @@ class UploadQueue:
                         position = _probe_with_token(uri, access_token, size)
                         offset = position.get("offset", 0)
                     job.bytes_uploaded = offset
-                    _progress_with_token(job.session_id, offset, token)
+                    await _progress_with_token(job.session_id, offset, token)
                     continue
 
                 if status in (401, 403):
@@ -609,12 +620,12 @@ def _parse_range_header(value: str) -> Optional[int]:
         return None
 
 
-def _progress_with_token(session_id: str, bytes_uploaded: int, token: str):
-    _json_request_with_token("POST", f"/uploads/{session_id}/progress", {"bytes_uploaded": bytes_uploaded}, token)
+async def _progress_with_token(session_id: str, bytes_uploaded: int, token: str):
+    await _json_request_with_token("POST", f"/uploads/{session_id}/progress", {"bytes_uploaded": bytes_uploaded}, token)
 
 
-def _complete_with_token(session_id: str, video_id: str, token: str):
-    _json_request_with_token("POST", f"/uploads/{session_id}/complete", {"video_id": video_id}, token)
+async def _complete_with_token(session_id: str, video_id: str, token: str):
+    await _json_request_with_token("POST", f"/uploads/{session_id}/complete", {"video_id": video_id}, token)
 
 
 class DaemonServer:
@@ -737,6 +748,14 @@ class DaemonServer:
 
         if not session_id:
             return {"error": "session_id required"}
+
+        # D4: Refuse to queue a second job for a session that already has one
+        # queued, claiming, uploading, or done. Return the existing job ID.
+        for job in self.queue.list_jobs():
+            if job["session_id"] == session_id and job["status"] in (
+                "queued", "claiming", "uploading", "done"
+            ):
+                return {"job_id": job["job_id"], "status": job["status"], "existing": True}
 
         job = UploadJob(
             job_id=uuid.uuid4().hex[:12],

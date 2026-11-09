@@ -142,9 +142,33 @@ def _json_request(method, path, payload=None, bearer=None):
     except Exception:
         result = {}
     if status >= 400:
+        # D2: Log every failed HTTP request: status, endpoint path (no query string),
+        # and the redacted response body.
+        _log_failed_http(method, path, status, result)
         raise UploadError("Ajons request failed (HTTP %d): %s" %
                           (status, _safe_text(result.get("error", "request rejected"))))
     return result
+
+
+def _log_failed_http(method: str, path: str, status: int, body: dict):
+    """Append a redacted failed-HTTP-request entry to the uploader log."""
+    try:
+        from pathlib import Path
+        import time
+        from security_redaction import redact_text
+        # Extract endpoint path without query string
+        endpoint = path.split("?")[0]
+        log_dir = Path.home() / ".local" / "share" / "Ajons" / "logs"
+        if __import__("os").name == "nt":
+            log_dir = Path(__import__("os").environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "Ajons" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        entry = "\n===== %s =====\nHTTP %s %s -> %d\n%s\n" % (
+            time.strftime("%Y-%m-%d %H:%M:%S"), method, endpoint, status,
+            redact_text(json.dumps(body, separators=(",", ":"))[:2000]))
+        with (log_dir / "uploader.log").open("a", encoding="utf-8") as f:
+            f.write(entry)
+    except Exception:
+        pass
 
 
 _http_request = _request

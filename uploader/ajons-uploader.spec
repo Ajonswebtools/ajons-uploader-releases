@@ -19,7 +19,7 @@ a = Analysis(
     ['ajons_uploader_cli.py'],
     pathex=[os.path.abspath(UPLOADER_DIR)],
     binaries=[],
-    datas=[('security_redaction.py', '.')],
+    datas=[('tools/security_redaction.py', 'tools')],
     hiddenimports=[
         'tools.ajons_video_uploader',
         'tools.ajons_daemon',

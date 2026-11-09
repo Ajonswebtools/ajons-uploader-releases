@@ -12,7 +12,7 @@ from pathlib import Path
 
 from tools import ajons_video_uploader as uploader
 from tools import ajons_daemon as daemon
-from uploader.ajons_video_uploader import UploadError
+from tools.ajons_video_uploader import UploadError
 
 VERSION = uploader.UPLOADER_VERSION
 

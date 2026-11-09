@@ -32,7 +32,7 @@ EXE="./$BINARY_NAME"
 echo "=== --version ==="
 VERSION_OUT=$("$EXE" --version)
 echo "$VERSION_OUT"
-echo "$VERSION_OUT" | grep -q "^ajons-uploader 1\.1\.1\$"
+echo "$VERSION_OUT" | grep -q "^ajons-uploader 1\.1\.2$"
 
 echo "=== status --json ==="
 STATUS_JSON=$("$EXE" status --json)

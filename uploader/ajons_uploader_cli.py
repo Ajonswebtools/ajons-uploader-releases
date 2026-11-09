@@ -63,12 +63,19 @@ def _write_traceback_to_log(exc):
         pass
 
 
-def _unexpected_error_message(exc, log_path, debug):
+def _handle_error(exc, log_path, debug, command_name="unknown"):
+    """Unified error handler for all uploader commands.
+
+    Always writes the redacted full traceback to the log file.
+    --debug / AJONS_DEBUG=1 also prints it to stderr.
+    The short message always includes the log path.
+    """
     _write_traceback_to_log(exc)
-    msg = ("Uploader failed unexpectedly. Full details (tokens, device codes and secrets "
-           "redacted) were written to: " + str(log_path))
+    msg = ("%s failed. Full details (tokens, device codes and secrets redacted) "
+           "were written to: %s" % (command_name, str(log_path)))
     if debug:
-        msg += "\n--- traceback ---\n" + redact_text(traceback.format_exc()) + "\n--- end ---"
+        tb = traceback.format_exc()
+        msg += "\n--- traceback ---\n" + redact_text(tb) + "\n--- end ---"
     return msg
 
 
@@ -161,6 +168,43 @@ def _paired():
         return False
 
 
+def _token_live_valid():
+    """Check if the stored refresh token can still obtain an access token.
+
+    Returns (valid: bool, needs_repair: bool). On invalid_grant, needs_repair=True.
+    """
+    try:
+        kr = uploader._keyring()
+        refresh_token = None
+        if kr:
+            refresh_token = kr.get_password(uploader.STORE_SERVICE, "device-refresh")
+        if not refresh_token:
+            path = uploader._config_file()
+            if path.is_file() and not (path.stat().st_mode & 0o077):
+                data = json.loads(path.read_text(encoding="utf-8"))
+                refresh_token = data.get("refresh_token")
+        if not refresh_token:
+            return False, False
+        result = _json_request_with_retry("POST", "/device/token",
+                                          {"refresh_token": refresh_token})
+        if result.get("refresh_token") or result.get("access_token"):
+            return True, False
+        return False, False
+    except UploadError as exc:
+        msg = str(exc).lower()
+        if "invalid_grant" in msg:
+            return False, True
+        return False, False
+    except Exception:
+        return False, False
+
+
+def _json_request_with_retry(method, path, payload):
+    """Thin wrapper around uploader's JSON request that surfaces UploadError."""
+    from tools.ajons_video_uploader import UploadError
+    return uploader._json_request(method, path, payload)
+
+
 def _serve(argv):
     parser = argparse.ArgumentParser(prog="ajons-uploader serve")
     parser.add_argument("--concurrency", type=int, default=daemon.DEFAULT_CONCURRENCY, help="Max concurrent uploads (default: 3)")
@@ -186,24 +230,45 @@ def _status(argv):
     latest = _latest_version()
     paired = _paired()
     daemon_running = daemon._is_daemon_running()
+
+    # D7: When the daemon is running, use its cached token state to avoid
+    # racing the daemon's own proactive token refresh. Only do a live
+    # refresh check when the daemon is not running.
+    if daemon_running:
+        d_status = daemon.daemon_status()
+        token_valid = d_status.get("token_valid", False)
+        needs_repair = d_status.get("needs_repair", True)
+        last_renewal_error = d_status.get("last_renewal_error")
+    else:
+        token_valid, needs_repair = _token_live_valid()
+        last_renewal_error = None
+
     base_result = {"installed_version": VERSION, "paired": paired,
-                  "token_valid": paired,
-                  "needs_repair": not paired,
+                  "token_valid": token_valid,
+                  "needs_repair": needs_repair,
                   "daemon_running": daemon_running,
                   "latest_version": latest,
                   "update_available": bool(latest and _version_tuple(latest) > _version_tuple(VERSION))}
+
+    if needs_repair and not daemon_running:
+        if args.json:
+            print(json.dumps(base_result, separators=(",", ":")))
+        else:
+            print("Pairing expired. Run pair again.")
+        return 1
 
     if args.session:
         session_result = uploader.local_status(args.session)
         base_result.update(session_result)
 
     if daemon_running:
-        daemon_status = daemon.daemon_status()
-        base_result["daemon"] = daemon_status
-        if "token_valid" in daemon_status:
-            base_result["token_valid"] = daemon_status["token_valid"]
-        if "needs_repair" in daemon_status:
-            base_result["needs_repair"] = daemon_status["needs_repair"]
+        base_result["daemon"] = d_status
+        if "token_valid" in d_status:
+            base_result["token_valid"] = d_status["token_valid"]
+        if "needs_repair" in d_status:
+            base_result["needs_repair"] = d_status["needs_repair"]
+        if "last_renewal_error" in d_status:
+            base_result["last_renewal_error"] = d_status["last_renewal_error"]
 
     if args.json:
         print(json.dumps(base_result, separators=(",", ":")))
@@ -212,8 +277,9 @@ def _status(argv):
         if daemon._is_daemon_running():
             d = daemon.daemon_status()
             daemon_info = f"; daemon=running (jobs={d.get('running', 0)}/{d.get('concurrency', 3)}, token_valid={d.get('token_valid', False)})"
-        print("ajons-uploader %s; paired=%s; update_available=%s%s" %
-              (VERSION, str(base_result["paired"]).lower(), str(base_result["update_available"]).lower(), daemon_info))
+        print("ajons-uploader %s; paired=%s; token_valid=%s; needs_repair=%s; update_available=%s%s" %
+              (VERSION, str(base_result["paired"]).lower(), str(base_result["token_valid"]).lower(),
+               str(base_result["needs_repair"]).lower(), str(base_result["update_available"]).lower(), daemon_info))
     return 0
 
 
@@ -256,16 +322,94 @@ def _stop(argv):
     return 0
 
 
+def _preflight(argv):
+    parser = argparse.ArgumentParser(prog="ajons-uploader preflight")
+    parser.add_argument("--server", help="MCP server base URL to fetch runbook version")
+    args = parser.parse_args(argv[1:])
+
+    log_path = _log_path()
+    debug = _debug_enabled()
+    results = []
+
+    # 1. Version check
+    try:
+        latest = _latest_version()
+        v_ok = bool(latest)
+        results.append(("version", v_ok, "installed=%s latest=%s" % (VERSION, latest or "unknown")))
+    except Exception as exc:
+        results.append(("version", False, str(exc)))
+
+    # 2. Token validity (use daemon cache when running to avoid racing daemon refresh)
+    try:
+        d_running = daemon._is_daemon_running()
+        if d_running:
+            d_status = daemon.daemon_status()
+            token_valid = d_status.get("token_valid", False)
+            needs_repair = d_status.get("needs_repair", True)
+        else:
+            token_valid, needs_repair = _token_live_valid()
+        results.append(("token", token_valid and not needs_repair,
+                        "valid=%s needs_repair=%s daemon=%s" %
+                        (token_valid, needs_repair, d_running)))
+    except Exception as exc:
+        results.append(("token", False, str(exc)))
+
+    # 3. Keyring access
+    try:
+        kr = uploader._keyring()
+        rt = kr.get_password(uploader.STORE_SERVICE, "device-refresh") if kr else None
+        results.append(("keyring", bool(kr), "available=%s has_refresh_token=%s" % (bool(kr), bool(rt))))
+    except Exception as exc:
+        results.append(("keyring", False, str(exc)))
+
+    # 4. Daemon state
+    try:
+        d_running = daemon._is_daemon_running()
+        results.append(("daemon", True, "running=%s" % d_running))
+    except Exception as exc:
+        results.append(("daemon", False, str(exc)))
+
+    # 5. Runbook version from server
+    runbook_version = None
+    if args.server:
+        try:
+            import urllib.request
+            url = args.server.rstrip("/") + "/mcp/call"
+            req = urllib.request.Request(url, data=json.dumps({
+                "jsonrpc": "2.0", "method": "get_upload_runbook", "params": {}
+            }).encode(), headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read())
+                runbook_version = data.get("result", {}).get("runbook_version")
+            results.append(("runbook", True, "server_version=%s" % runbook_version))
+        except Exception as exc:
+            results.append(("runbook", False, "server unreachable: %s" % str(exc)[:100]))
+    else:
+        results.append(("runbook", False, "no --server given; skipping"))
+
+    all_pass = all(r[1] for r in results)
+    for name, ok, detail in results:
+        print("%s: %s (%s)" % (name, "PASS" if ok else "FAIL", detail))
+    print()
+    print("preflight: %s" % ("ALL PASS" if all_pass else "FAILURES DETECTED"))
+    return 0 if all_pass else 1
+
+
 def _pair(argv):
     parser = argparse.ArgumentParser(prog="ajons-uploader pair")
     parser.add_argument("--device-name")
     parser.add_argument("--allow-insecure-file", action="store_true",
                         help="Explicitly allow a 0600 config-file fallback if the OS keyring is unavailable")
     args = parser.parse_args(argv[1:])
+    log_path = _log_path()
+    debug = _debug_enabled()
     try:
         uploader.pair(args.allow_insecure_file, args.device_name)
     except UploadError as exc:
         sys.stderr.write("Pairing failed: %s\n" % exc)
+        return 1
+    except Exception as exc:
+        sys.stderr.write(_handle_error(exc, log_path, debug, "pair") + "\n")
         return 1
     return 0
 
@@ -283,6 +427,8 @@ def _upload(argv):
     if args._worker:
         return uploader.upload_worker(args.session, args.file, args.allow_insecure_file) or 0
 
+    log_path = _log_path()
+    debug = _debug_enabled()
     try:
         uploader.upload(args.session, args.file, args.allow_insecure_file)
     except UploadError as exc:
@@ -291,8 +437,8 @@ def _upload(argv):
     except KeyboardInterrupt:
         sys.stderr.write("Upload interrupted. Re-run with the same session to resume.\n")
         return 130
-    except Exception:
-        sys.stderr.write("Uploader failed unexpectedly. Sensitive details were suppressed.\n")
+    except Exception as exc:
+        sys.stderr.write(_handle_error(exc, log_path, debug, "upload") + "\n")
         return 1
     return 0
 
@@ -305,6 +451,8 @@ def _upload_media(argv):
                         help="Use a previously opted-in 0600 config-file credential fallback")
     args = parser.parse_args(argv)
 
+    log_path = _log_path()
+    debug = _debug_enabled()
     try:
         uploader.upload_media(args.session, args.file, args.allow_insecure_file)
     except UploadError as exc:
@@ -313,9 +461,120 @@ def _upload_media(argv):
     except KeyboardInterrupt:
         sys.stderr.write("Upload interrupted.\n")
         return 130
-    except Exception:
-        sys.stderr.write("Uploader failed unexpectedly. Sensitive details were suppressed.\n")
+    except Exception as exc:
+        sys.stderr.write(_handle_error(exc, log_path, debug, "upload-media") + "\n")
         return 1
+    return 0
+
+
+def _upload_batch(argv):
+    """upload-batch: process files one at a time with session-per-file verification."""
+    parser = argparse.ArgumentParser(prog="ajons-uploader upload-batch")
+    parser.add_argument("path", help="Folder containing video files, or comma-separated file list")
+    parser.add_argument("--metadata", required=True, help="JSON file or JSON string with per-file metadata")
+    parser.add_argument("--server", required=True, help="MCP server base URL")
+    args = parser.parse_args(argv[1:])
+
+    # Parse metadata
+    try:
+        if os.path.isfile(args.metadata):
+            metadata = json.loads(Path(args.metadata).read_text(encoding="utf-8"))
+        else:
+            metadata = json.loads(args.metadata)
+    except Exception as exc:
+        sys.stderr.write("Invalid metadata: %s\n" % exc)
+        return 1
+
+    # Build file list
+    files = []
+    if os.path.isdir(args.path):
+        for f in sorted(Path(args.path).iterdir()):
+            if f.is_file() and f.stat().st_size > 0:
+                files.append(str(f))
+    else:
+        files = [f.strip() for f in args.path.split(",") if f.strip()]
+
+    if not files:
+        print("No files to process.")
+        return 0
+
+    import urllib.request
+
+    def mcp_call(method, params):
+        url = args.server.rstrip("/") + "/mcp/call"
+        req = urllib.request.Request(url, data=json.dumps({
+            "jsonrpc": "2.0", "method": method, "params": params
+        }).encode(), headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read())
+        except Exception as exc:
+            return {"error": str(exc)}
+
+    report = []
+    for file_path in files:
+        path = Path(file_path)
+        if not path.is_file():
+            report.append((file_path, "SKIP", "file not found"))
+            continue
+
+        file_size = path.stat().st_size
+        file_meta = metadata.get(path.name, metadata) if isinstance(metadata, dict) else metadata
+        title = file_meta.get("title", path.stem) if isinstance(file_meta, dict) else str(file_meta)
+
+        # Step 1: initiate session
+        result = mcp_call("initiate_video_upload", {
+            "channel_id": file_meta.get("channel_id", "") if isinstance(file_meta, dict) else "",
+            "title": title,
+            "total_bytes": file_size,
+            "file_name": path.name,
+            "privacy_status": file_meta.get("privacy_status", "private") if isinstance(file_meta, dict) else "private",
+        })
+        if "error" in result:
+            report.append((file_path, "FAIL", "initiate: %s" % result["error"]))
+            break
+        session_id = result.get("result", {}).get("session_id")
+        returned_bytes = result.get("result", {}).get("total_bytes")
+        returned_title = result.get("result", {}).get("title")
+        if not session_id:
+            report.append((file_path, "FAIL", "no session_id returned"))
+            break
+        if returned_bytes != file_size:
+            report.append((file_path, "FAIL",
+                "Session size mismatch: local %s, server %s" % (file_size, returned_bytes)))
+            break
+        if returned_title != title:
+            report.append((file_path, "FAIL",
+                "Title mismatch: local '%s', server '%s'" % (title, returned_title)))
+            break
+
+        # Step 2: upload via CLI
+        upload_result = _upload(["--session", session_id, "--file", str(path)])
+        if upload_result != 0:
+            report.append((file_path, "FAIL", "upload command returned %d" % upload_result))
+            break
+
+        # Step 3: verify
+        result = mcp_call("verify_video", {"session_id": session_id})
+        if "error" in result:
+            report.append((file_path, "FAIL", "verify: %s" % result["error"]))
+            break
+        vr = result.get("result", {})
+        if vr.get("success"):
+            report.append((file_path, "PASS", "verified video_id=%s" % vr.get("video_id")))
+        else:
+            report.append((file_path, "FAIL", "verification not successful: %s" % vr))
+            break
+
+    print()
+    print("=== Batch Report ===")
+    for fname, status, detail in report:
+        print("%s: %s - %s" % (fname, status, detail))
+    failures = [r for r in report if r[1] == "FAIL"]
+    if failures:
+        print("Batch stopped at first failure. %d of %d files processed." % (len(report), len(files)))
+        return 1
+    print("All %d files uploaded and verified." % len(files))
     return 0
 
 
@@ -377,6 +636,8 @@ def main(argv=None):
             print("  stop        Stop upload daemon")
             print("  upload      Upload a file")
             print("  upload-media  Upload a media file")
+            print("  preflight   Run preflight checks (version, token, keyring, daemon, runbook)")
+            print("  upload-batch  Upload multiple files one at a time with verification")
             print()
             print("Options:")
             print("  --version   Show version and exit")
@@ -396,6 +657,10 @@ def main(argv=None):
             return _cancel(argv[1:])
         if argv and argv[0] == "stop":
             return _stop(argv[1:])
+        if argv and argv[0] == "preflight":
+            return _preflight(argv[1:])
+        if argv and argv[0] == "upload-batch":
+            return _upload_batch(argv[1:])
         if argv and argv[0] in ("upload", "upload-media"):
             media_upload = argv[0] == "upload-media"
             if media_upload:
@@ -410,7 +675,7 @@ def main(argv=None):
         sys.stderr.write("Interrupted\n")
         return 130
     except Exception:
-        sys.stderr.write(_unexpected_error_message(sys.exc_info()[1], log_path, debug) + "\n")
+        sys.stderr.write(_handle_error(sys.exc_info()[1], log_path, debug, "ajons-uploader") + "\n")
         return 1
 
 

@@ -5,14 +5,16 @@ import os
 block_cipher = None
 
 a = Analysis(
-    ['ajons_uploader_cli.py'],
+    ['uploader/ajons_uploader_cli.py'],
     pathex=['.'],
     binaries=[],
-    datas=[('ajons_video_uploader.py', '.'),
-           ('security_redaction.py', '.')],
+    datas=[('uploader/security_redaction.py', 'uploader')],
     hiddenimports=[
-        'ajons_video_uploader',
-        'security_redaction',
+        'uploader.ajons_video_uploader',
+        'uploader.ajons_daemon',
+        'uploader.ajons_constants',
+        'uploader.ajons_utils',
+        'uploader.security_redaction',
         'urllib.request',
         'urllib.error',
         'json',
@@ -24,6 +26,11 @@ a = Analysis(
         'keyring.backends.Windows',
         'keyring.backends.macOS',
         'keyring.backends.SecretService',
+        'asyncio',
+        'dataclasses',
+        'uuid',
+        'socket',
+        'signal',
     ],
     hookspath=[],
     hooksconfig={},

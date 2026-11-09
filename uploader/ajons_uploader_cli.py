@@ -10,8 +10,8 @@ import subprocess
 import time
 from pathlib import Path
 
-from tools import ajons_video_uploader as uploader
-from tools.ajons_video_uploader import UploadError, pair, upload, upload_media
+import ajons_video_uploader as uploader
+from ajons_video_uploader import UploadError, pair, upload, upload_media
 
 VERSION = uploader.UPLOADER_VERSION
 

@@ -91,13 +91,16 @@ jobs:
             EXE="dist/ajons-uploader"
           fi
           # Test --version
+          echo "Testing $EXE --version"
           VERSION_OUTPUT=$("$EXE" --version 2>&1)
-          echo "Version output: $VERSION_OUTPUT"
+          echo "Version output: '$VERSION_OUTPUT'"
           if ! echo "$VERSION_OUTPUT" | grep -q "ajons-uploader 1.1.0"; then
             echo "ERROR: --version did not print 'ajons-uploader 1.1.0'"
+            echo "Exit code: $?"
             exit 1
           fi
           # Test --help lists serve, stop, cancel
+          echo "Testing $EXE --help"
           HELP_OUTPUT=$("$EXE" --help 2>&1)
           echo "Help output:"
           echo "$HELP_OUTPUT"

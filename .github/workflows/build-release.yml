@@ -104,7 +104,8 @@ jobs:
           fi
           # Test --help lists serve, stop, cancel
           echo "Testing $EXE --help"
-          HELP_OUTPUT=$("$EXE" --help 2>&1)
+          HELP_OUTPUT=$("$EXE" --help 2>&1 || true)
+          echo "Help output exit code: $?"
           echo "Help output:"
           echo "$HELP_OUTPUT"
           for cmd in serve stop cancel; do

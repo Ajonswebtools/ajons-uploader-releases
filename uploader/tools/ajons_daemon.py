@@ -23,14 +23,14 @@ import keyring
 import httpx
 from security_redaction import redact_text
 
-from uploader.ajons_constants import (
+from tools.ajons_constants import (
     BASE_URL,
     CHUNK,
     STORE_SERVICE,
     UPLOADER_VERSION,
     UploadError,
 )
-from uploader.ajons_utils import (
+from tools.ajons_utils import (
     _config_file,
     _keyring,
     _load_refresh_token,

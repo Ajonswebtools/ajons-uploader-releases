@@ -9,9 +9,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from security_redaction import redact_text
+from tools.security_redaction import redact_text
 
-from uploader.ajons_constants import (
+from tools.ajons_constants import (
     BASE_URL,
     CHUNK,
     STORE_SERVICE,

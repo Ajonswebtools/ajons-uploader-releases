@@ -82,6 +82,32 @@ jobs:
           python -m pip install pyinstaller==6.11.1 keyring
       - name: Build with PyInstaller
         run: python -m PyInstaller uploader/ajons-uploader.spec --clean
+      - name: Smoke test
+        shell: bash
+        run: |
+          if [ "${{ matrix.target }}" = "windows" ]; then
+            EXE="dist/ajons-uploader.exe"
+          else
+            EXE="dist/ajons-uploader"
+          fi
+          # Test --version
+          VERSION_OUTPUT=$("$EXE" --version 2>&1)
+          echo "Version output: $VERSION_OUTPUT"
+          if ! echo "$VERSION_OUTPUT" | grep -q "ajons-uploader 1.1.0"; then
+            echo "ERROR: --version did not print 'ajons-uploader 1.1.0'"
+            exit 1
+          fi
+          # Test --help lists serve, stop, cancel
+          HELP_OUTPUT=$("$EXE" --help 2>&1)
+          echo "Help output:"
+          echo "$HELP_OUTPUT"
+          for cmd in serve stop cancel; do
+            if ! echo "$HELP_OUTPUT" | grep -q "$cmd"; then
+              echo "ERROR: --help does not list '$cmd' command"
+              exit 1
+            fi
+          done
+          echo "Smoke test passed"
       - name: Prepare artifact
         shell: bash
         run: |

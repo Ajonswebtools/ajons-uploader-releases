@@ -2,19 +2,27 @@
 import sys
 import os
 
+# Resolve uploader directory from spec file location
+SPECPATH = os.path.dirname(os.path.abspath(__file__))
+UPLOADER_DIR = os.path.join(SPECPATH, '..', 'uploader')
+UPLOADER_DIR = os.path.normpath(UPLOADER_DIR)
+
+# Ensure uploader directory is on Python path for module discovery
+sys.path.insert(0, UPLOADER_DIR)
+
 block_cipher = None
 
 a = Analysis(
     ['ajons_uploader_cli.py'],
-    pathex=['.'],
+    pathex=[UPLOADER_DIR],
     binaries=[],
     datas=[('security_redaction.py', '.')],
     hiddenimports=[
-        'ajons_video_uploader',
-        'ajons_daemon',
-        'ajons_constants',
-        'ajons_utils',
-        'security_redaction',
+        'tools.ajons_video_uploader',
+        'tools.ajons_daemon',
+        'tools.ajons_constants',
+        'tools.ajons_utils',
+        'tools.security_redaction',
         'urllib.request',
         'urllib.error',
         'json',

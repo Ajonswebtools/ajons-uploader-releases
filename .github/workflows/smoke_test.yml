@@ -1,0 +1,84 @@
+name: Smoke Test Built Uploader Binaries
+
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Comma-separated: windows,linux,macos-intel,macos-arm64 (default all)'
+        required: false
+        type: string
+        default: 'windows,linux,macos-intel,macos-arm64'
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Parse platforms input
+        id: set-matrix
+        run: |
+          PLATFORMS="${{ github.event.inputs.platforms || 'windows,linux,macos-intel,macos-arm64' }}"
+          PLATFORMS=$(echo "$PLATFORMS" | sed 's/ //g')
+          MATRIX='{"include":[]}'
+          IFS=',' read -ra PLATFORMS_ARRAY <<< "$PLATFORMS"
+          for P in "${PLATFORMS_ARRAY[@]}"; do
+            case "$P" in
+              windows)
+                MATRIX=$(echo "$MATRIX" | jq -c '.include += [{"os": "windows-latest", "binary_name": "ajons-uploader.exe", "platform": "windows"}]')
+                ;;
+              linux)
+                MATRIX=$(echo "$MATRIX" | jq -c '.include += [{"os": "ubuntu-latest", "binary_name": "ajons-uploader", "platform": "linux"}]')
+                ;;
+              macos-intel)
+                MATRIX=$(echo "$MATRIX" | jq -c '.include += [{"os": "macos-15-intel", "binary_name": "ajons-uploader", "platform": "macos"}]')
+                ;;
+              macos-arm64)
+                MATRIX=$(echo "$MATRIX" | jq -c '.include += [{"os": "macos-latest", "binary_name": "ajons-uploader", "platform": "macos"}]')
+                ;;
+              *)
+                echo "Error: unknown platform '$P'" >&2
+                exit 1
+                ;;
+            esac
+          done
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+
+  smoke:
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install pywin32-ctypes for Windows keyring backend
+        if: runner.os == 'Windows'
+        run: pip install pywin32-ctypes
+
+      - name: Build with PyInstaller
+        run: |
+          python -m PyInstaller uploader/ajons-uploader.spec --clean
+
+      - name: Smoke test built binary
+        shell: bash
+        run: |
+          chmod +x .github/scripts/smoke_test.sh
+          .github/scripts/smoke_test.sh "${{ matrix.binary_name }}" "$GITHUB_WORKSPACE" "${{ matrix.platform }}"

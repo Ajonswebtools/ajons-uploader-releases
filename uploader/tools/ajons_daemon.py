@@ -21,7 +21,7 @@ from typing import Any, Callable, Optional
 
 import keyring
 import httpx
-from tools.security_redaction import redact_text
+from security_redaction import redact_text
 
 from tools.ajons_constants import (
     BASE_URL,
@@ -40,8 +40,8 @@ from tools.ajons_utils import (
 )
 
 
-DAEMON_VERSION = "1.1.0"
-UPLOADER_VERSION = "1.1.0"
+DAEMON_VERSION = "1.1.1"
+UPLOADER_VERSION = "1.1.1"
 DAEMON_SOCKET_NAME = "ajons-uploader.sock"
 DAEMON_INFO_FILE = "daemon.json"
 DAEMON_LOCK_FILE = "daemon.lock"
@@ -262,8 +262,7 @@ def _clear_daemon_info():
             pass
 
 
-def _is_daemon_running() -> bool:
-    return _get_daemon_connection() is not None
+def _acquire_daemon_lock() -> Optional[int]:
     lock_path = _daemon_lock_path()
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -274,10 +273,10 @@ def _is_daemon_running() -> bool:
     except FileExistsError:
         try:
             existing_pid = int(lock_path.read_text().strip())
-            if existing_pid > 0 and _pid_alive(existing_pid):
-                return None
         except Exception:
-            pass
+            return None
+        if existing_pid > 0 and _pid_alive(existing_pid):
+            return None
         try:
             lock_path.unlink()
             fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -286,6 +285,10 @@ def _is_daemon_running() -> bool:
             return os.getpid()
         except Exception:
             return None
+
+
+def _is_daemon_running() -> bool:
+    return _get_daemon_connection() is not None
 
 
 def _release_daemon_lock():
@@ -634,6 +637,7 @@ class DaemonServer:
         self.queue = UploadQueue(concurrency)
         self._server: Optional[asyncio.Server] = None
         self._running = False
+        self.stop_event: Optional[asyncio.Event] = None
 
     async def start(self):
         if os.name != "nt":
@@ -662,8 +666,7 @@ class DaemonServer:
 
         initialized = await self.token_manager.initialize()
         if not initialized:
-            print("No paired device found. Run 'ajons-uploader pair' first.", file=sys.stderr)
-            return False
+            print("No paired device found. Run 'ajons-uploader pair' first to enable uploads.", file=sys.stderr)
 
         await self.token_manager.start_proactive_renewal()
         await self.queue.start(self.token_manager)
@@ -689,6 +692,8 @@ class DaemonServer:
         _release_daemon_lock()
         _clear_daemon_info()
         print("Daemon stopped", file=sys.stderr)
+        if self.stop_event:
+            self.stop_event.set()
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:
@@ -782,7 +787,8 @@ class DaemonServer:
         return {"cancelled": True}
 
     async def _handle_stop(self) -> dict:
-        asyncio.create_task(self.stop())
+        if self.stop_event:
+            self.stop_event.set()
         return {"stopping": True}
 
     async def _handle_pair(self, request: dict) -> dict:
@@ -862,6 +868,7 @@ async def run_daemon(concurrency: int = DEFAULT_CONCURRENCY, allow_file: bool = 
 
     loop = asyncio.get_event_loop()
     stop_event = asyncio.Event()
+    server.stop_event = stop_event
 
     def signal_handler():
         stop_event.set()

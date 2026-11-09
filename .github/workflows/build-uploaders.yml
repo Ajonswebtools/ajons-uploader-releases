@@ -1,0 +1,210 @@
+name: Build and Publish Uploaders
+
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Comma-separated: windows,linux,macos-intel,macos-arm64 (default all)'
+        required: false
+        type: string
+        default: 'windows,linux,macos-intel,macos-arm64'
+      release_version:
+        description: 'Release tag, e.g. v1.1.1 (required to publish)'
+        required: false
+        type: string
+      release_notes:
+        description: 'Release notes'
+        required: false
+        type: string
+      publish_to_public:
+        description: 'Publish to public repo (creates DRAFT only)'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Parse platforms input
+        id: set-matrix
+        run: |
+          PLATFORMS="${{ github.event.inputs.platforms || 'windows,linux,macos-intel,macos-arm64' }}"
+          PLATFORMS=$(echo "$PLATFORMS" | sed 's/ //g')
+          if [ -z "$PLATFORMS" ]; then
+            PLATFORMS="windows,linux,macos-intel,macos-arm64"
+          fi
+          MATRIX='{"include":[]}'
+          IFS=',' read -ra PLATFORMS_ARRAY <<< "$PLATFORMS"
+          for P in "${PLATFORMS_ARRAY[@]}"; do
+            case "$P" in
+              windows)
+                MATRIX=$(echo "$MATRIX" | jq -c '.include += [{"os": "windows-latest", "target": "windows", "asset_name": "ajons-uploader-windows-x64.exe"}]')
+                ;;
+              linux)
+                MATRIX=$(echo "$MATRIX" | jq -c '.include += [{"os": "ubuntu-latest", "target": "linux", "asset_name": "ajons-uploader-linux-x64"}]')
+                ;;
+              macos-intel)
+                MATRIX=$(echo "$MATRIX" | jq -c '.include += [{"os": "macos-15-intel", "target": "macos-intel", "asset_name": "ajons-uploader-macos-intel"}]')
+                ;;
+              macos-arm64)
+                MATRIX=$(echo "$MATRIX" | jq -c '.include += [{"os": "macos-latest", "target": "macos-arm64", "asset_name": "ajons-uploader-macos-arm64"}]')
+                ;;
+              *)
+                echo "Error: unknown platform '$P'" >&2
+                exit 1
+                ;;
+            esac
+          done
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+
+  build:
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install pywin32-ctypes for Windows keyring backend
+        if: runner.os == 'Windows'
+        run: pip install pywin32-ctypes
+
+      - name: Build with PyInstaller
+        run: |
+          python -m PyInstaller uploader/ajons-uploader.spec --clean
+
+      - name: Verify binary
+        shell: bash
+        run: |
+          if [ "${{ matrix.target }}" = "windows" ]; then
+            file ./dist/ajons-uploader.exe || true
+            ./dist/ajons-uploader.exe --version || true
+          else
+            file ./dist/ajons-uploader || true
+            ./dist/ajons-uploader --version || true
+          fi
+
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          if [ "${{ matrix.target }}" = "windows" ]; then
+            cp dist/ajons-uploader.exe artifacts/${{ matrix.asset_name }}
+          else
+            cp dist/ajons-uploader artifacts/${{ matrix.asset_name }}
+          fi
+          cd artifacts
+          sha256sum ${{ matrix.asset_name }} > ${{ matrix.asset_name }}.sha256
+          cat ${{ matrix.asset_name }}.sha256
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: ${{ matrix.asset_name }}
+          path: artifacts/
+          retention-days: 30
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event.inputs.publish_to_public == 'true' && github.event.inputs.release_version != ''
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Validate release version
+        run: |
+          VERSION="${{ github.event.inputs.release_version }}"
+          if [ -z "$VERSION" ]; then
+            echo "Error: release_version required when publishing"
+            exit 1
+          fi
+          if ! echo "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Error: version must match pattern vX.Y.Z"
+            exit 1
+          fi
+          echo "Version validation passed: $VERSION"
+
+      - name: Check for existing release in this repo
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ github.event.inputs.release_version }}"
+          if gh release view "$VERSION" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Error: Release $VERSION already exists in ${{ github.repository }}"
+            exit 1
+          fi
+          echo "No existing release found for $VERSION"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Verify downloaded artifacts exist and have expected names
+        shell: bash
+        run: |
+          cd dist
+          for f in ajons-uploader-windows-x64.exe ajons-uploader-linux-x64 ajons-uploader-macos-intel ajons-uploader-macos-arm64; do
+            if [ ! -f "$f" ] || [ ! -s "$f" ]; then
+              echo "Error: $f missing or empty in dist/"
+              exit 1
+            fi
+            echo "OK: $f ($(stat -c%s $f) bytes)"
+          done
+
+      - name: Create checksums manifest
+        shell: bash
+        run: |
+          cd dist
+          : > SHA256SUMS
+          for f in ajons-uploader-windows-x64.exe ajons-uploader-linux-x64 ajons-uploader-macos-intel ajons-uploader-macos-arm64; do
+            [ -f "$f" ] && sha256sum "$f" >> SHA256SUMS || true
+          done
+          [ -s SHA256SUMS ] || { echo "Error: SHA256SUMS empty"; exit 1; }
+          sha256sum -c SHA256SUMS
+
+      - name: Create DRAFT release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          VERSION="${{ github.event.inputs.release_version }}"
+          FILES=(dist/SHA256SUMS)
+          for f in ajons-uploader-windows-x64.exe ajons-uploader-linux-x64 ajons-uploader-macos-intel ajons-uploader-macos-arm64; do
+            [ -f "dist/$f" ] && FILES+=("dist/$f")
+          done
+          gh release create "$VERSION" \
+            --title "Ajons Uploader $VERSION" \
+            --notes "${{ github.event.inputs.release_notes || 'Ajons Uploader release' }}" \
+            --draft \
+            --target "${{ github.sha }}" \
+            "${FILES[@]}"
+          echo "Release created as draft: $VERSION"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-path: dist/*

@@ -3,12 +3,16 @@
 import argparse
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
 import time
+import traceback
 import urllib.request
 from pathlib import Path
+
+from security_redaction import redact_text
 
 from tools import ajons_video_uploader as uploader
 from tools import ajons_daemon as daemon
@@ -25,6 +29,47 @@ def _install_dir():
 
 def _installed_name():
     return "ajons-uploader.exe" if os.name == "nt" else "ajons-uploader"
+
+
+def _debug_enabled():
+    if os.environ.get("AJONS_DEBUG", "").strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    return "--debug" in sys.argv
+
+
+def _log_dir():
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
+        return base / "Ajons" / "logs"
+    if platform.system() == "Darwin":
+        return Path.home() / "Library" / "Logs" / "Ajons"
+    return Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "Ajons" / "logs"
+
+
+def _log_path():
+    return _log_dir() / "uploader.log"
+
+
+def _write_traceback_to_log(exc):
+    """Append the full (redacted) traceback for `exc` to the user log file."""
+    try:
+        log_dir = _log_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        tb = traceback.format_exc()
+        entry = "\n===== %s =====\n%s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), redact_text(tb))
+        with (_log_dir() / "uploader.log").open("a", encoding="utf-8") as stream:
+            stream.write(entry)
+    except Exception:
+        pass
+
+
+def _unexpected_error_message(exc, log_path, debug):
+    _write_traceback_to_log(exc)
+    msg = ("Uploader failed unexpectedly. Full details (tokens, device codes and secrets "
+           "redacted) were written to: " + str(log_path))
+    if debug:
+        msg += "\n--- traceback ---\n" + redact_text(traceback.format_exc()) + "\n--- end ---"
+    return msg
 
 
 def _update_user_path(directory):
@@ -139,7 +184,12 @@ def _status(argv):
     args = parser.parse_args(argv[1:])
 
     latest = _latest_version()
-    base_result = {"installed_version": VERSION, "paired": _paired(),
+    paired = _paired()
+    daemon_running = daemon._is_daemon_running()
+    base_result = {"installed_version": VERSION, "paired": paired,
+                  "token_valid": paired,
+                  "needs_repair": not paired,
+                  "daemon_running": daemon_running,
                   "latest_version": latest,
                   "update_available": bool(latest and _version_tuple(latest) > _version_tuple(VERSION))}
 
@@ -147,9 +197,13 @@ def _status(argv):
         session_result = uploader.local_status(args.session)
         base_result.update(session_result)
 
-    if daemon._is_daemon_running():
+    if daemon_running:
         daemon_status = daemon.daemon_status()
         base_result["daemon"] = daemon_status
+        if "token_valid" in daemon_status:
+            base_result["token_valid"] = daemon_status["token_valid"]
+        if "needs_repair" in daemon_status:
+            base_result["needs_repair"] = daemon_status["needs_repair"]
 
     if args.json:
         print(json.dumps(base_result, separators=(",", ":")))
@@ -301,6 +355,9 @@ def _menu():
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    debug = _debug_enabled()
+    argv = [a for a in argv if a != "--debug"]
+    log_path = _log_path()
     try:
         if not argv and sys.stdin.isatty() and sys.stdout.isatty():
             return _menu()
@@ -353,7 +410,7 @@ def main(argv=None):
         sys.stderr.write("Interrupted\n")
         return 130
     except Exception:
-        sys.stderr.write("Uploader failed unexpectedly. Sensitive details were suppressed.\n")
+        sys.stderr.write(_unexpected_error_message(sys.exc_info()[1], log_path, debug) + "\n")
         return 1
 
 

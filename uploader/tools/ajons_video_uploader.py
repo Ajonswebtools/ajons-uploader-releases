@@ -20,7 +20,7 @@ import subprocess
 import shutil
 from pathlib import Path
 
-from tools.security_redaction import redact_text
+from security_redaction import redact_text
 
 from tools.ajons_constants import (
     BASE_URL,

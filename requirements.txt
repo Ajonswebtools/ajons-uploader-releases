@@ -1,0 +1,4 @@
+# Ajons uploader build dependencies (PyInstaller release builds only)
+pyinstaller==6.11.1
+keyring==25.7.0
+httpx

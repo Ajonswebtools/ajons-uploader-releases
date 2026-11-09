@@ -2,47 +2,27 @@
 import sys
 import os
 
-# When building from releases repo root, uploader dir is at ./uploader
-# When building from uploader repo root, uploader dir is at .
-# Detect which case we're in by checking if 'tools' package exists in current dir
-if os.path.isdir('tools'):
-    UPLOADER_DIR = '.'
-else:
-    UPLOADER_DIR = 'uploader'
+from PyInstaller.utils.hooks import collect_submodules
 
-# Ensure uploader directory is on Python path for module discovery
-sys.path.insert(0, os.path.abspath(UPLOADER_DIR))
+# When building from releases repo root, uploader dir is at ./uploader.
+# The entry script and the tools package live under ./uploader.
+UPLOADER_DIR = 'uploader'
 
 block_cipher = None
 
 a = Analysis(
-    ['ajons_uploader_cli.py'],
+    ['uploader/ajons_uploader_cli.py'],
     pathex=[os.path.abspath(UPLOADER_DIR)],
     binaries=[],
-    datas=[('tools/security_redaction.py', 'tools')],
+    datas=[],
     hiddenimports=[
-        'tools.ajons_video_uploader',
-        'tools.ajons_daemon',
-        'tools.ajons_constants',
-        'tools.ajons_utils',
-        'tools.security_redaction',
-        'urllib.request',
-        'urllib.error',
-        'json',
-        'getpass',
-        'mimetypes',
-        'argparse',
-        'logging',
+        'security_redaction',
         'keyring',
         'keyring.backends.Windows',
         'keyring.backends.macOS',
         'keyring.backends.SecretService',
-        'asyncio',
-        'dataclasses',
-        'uuid',
-        'socket',
-        'signal',
-    ],
+        'win32ctypes',
+    ] + collect_submodules('tools'),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

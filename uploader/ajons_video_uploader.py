@@ -529,10 +529,13 @@ def _start_heartbeat(session_id, state):
 
 
 def _probe(uri, token, size):
-    status, headers, _body = _http_request("PUT", uri, bearer=token, data=b"", headers={
-        "Content-Length": "0", "Content-Range": "bytes */%d" % size,
-        "Content-Type": "application/octet-stream",
-    })
+    try:
+        status, headers, _body = _http_request("PUT", uri, bearer=token, data=b"", headers={
+            "Content-Length": "0", "Content-Range": "bytes */%d" % size,
+            "Content-Type": "application/octet-stream",
+        })
+    except Exception:
+        return None
     if status == 308:
         return {"offset": _parse_range_header(headers.get("Range")) or 0, "video_id": None}
     if status in (200, 201):
@@ -544,6 +547,11 @@ def _probe(uri, token, size):
     if status in (404, 410):
         raise UploadError("Google upload session expired.")
     return None
+
+
+def _probe_session_position(session_uri, access_token, total_bytes=None, timeout=60):
+    """Backward compatibility wrapper for tests."""
+    return _probe(session_uri, access_token, total_bytes or 0)
 
 
 def _probe_with_retry(session_id, uri, access_token, size, state, retry_count=0):

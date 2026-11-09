@@ -1,19 +1,23 @@
 # -*- mode: python ; coding: utf-8 -*-
-# Public distribution build: run from repository root.
-#   python -m PyInstaller uploader/ajons-uploader.spec --clean
-from pathlib import Path
+import sys
+import os
 
 block_cipher = None
-ROOT = Path(SPECPATH).resolve().parent
 
 a = Analysis(
-    [str(ROOT / 'uploader' / 'ajons_uploader_cli.py')],
-    pathex=[str(ROOT), str(ROOT / 'uploader')],
+    ['ajons_uploader_cli.py'],
+    pathex=['.'],
     binaries=[],
     datas=[],
     hiddenimports=[
         'ajons_video_uploader',
-        'security_redaction',
+        'urllib.request',
+        'urllib.error',
+        'json',
+        'getpass',
+        'mimetypes',
+        'argparse',
+        'logging',
         'keyring',
         'keyring.backends.Windows',
         'keyring.backends.macOS',
@@ -28,7 +32,9 @@ a = Analysis(
     cipher=block_cipher,
     noarchive=False,
 )
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
 exe = EXE(
     pyz,
     a.scripts,

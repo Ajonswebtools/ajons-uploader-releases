@@ -7,15 +7,11 @@ import sys
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
-try:
-    from . import ajons_video_uploader as uploader
-    from .ajons_video_uploader import UploadError
-except Exception:
-    import ajons_video_uploader as uploader
-    from ajons_video_uploader import UploadError
-pair=upload=upload_media=None  # rebound for testability
+from tools import ajons_video_uploader as uploader
+from tools.ajons_video_uploader import UploadError, pair, upload, upload_media
 
 VERSION = uploader.UPLOADER_VERSION
 
@@ -95,7 +91,7 @@ def _menu():
         choice = input("Choose 1-4: ").strip()
         try:
             if choice == "1":
-                (pair or uploader.pair)(False, None)
+                pair(False, None)
             elif choice == "2":
                 print("Paired" if _paired() else "Not paired. Choose 1 to pair this computer.")
             elif choice == "3":
@@ -107,7 +103,7 @@ def _menu():
         except UploadError as exc:
             print("Pairing failed: " + str(exc))
         finally:
-            input("Press Enter to close")
+            input("Press Enter to return to the menu")
 
 
 def _version_tuple(value):
@@ -172,7 +168,7 @@ def main(argv=None):
                                 help="Explicitly allow a 0600 config-file fallback if the OS keyring is unavailable")
             args = parser.parse_args(argv[1:])
             try:
-                (pair or uploader.pair)(args.allow_insecure_file, args.device_name)
+                pair(args.allow_insecure_file, args.device_name)
             except UploadError as exc:
                 sys.stderr.write("Pairing failed: %s\n" % exc)
                 return 1
@@ -198,11 +194,7 @@ def main(argv=None):
             raise UploadError("--detach is currently available for video uploads only.")
         if args.detach:
             return uploader.upload_detached(args.session, args.file, args.allow_insecure_file)
-        _fn = (upload_media or uploader.upload_media) if media_upload else (upload or uploader.upload)
-        try:
-            _fn(args.session, args.file, args.allow_insecure_file, media_upload)
-        except TypeError:
-            _fn(args.session, args.file, args.allow_insecure_file)
+        (upload_media if media_upload else upload)(args.session, args.file, args.allow_insecure_file)
         return 0
     except UploadError as exc:
         sys.stderr.write(str(exc) + "\n")

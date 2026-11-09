@@ -8,9 +8,11 @@ a = Analysis(
     ['ajons_uploader_cli.py'],
     pathex=['.'],
     binaries=[],
-    datas=[],
+    datas=[('ajons_video_uploader.py', '.'),
+           ('security_redaction.py', '.')],
     hiddenimports=[
         'ajons_video_uploader',
+        'security_redaction',
         'urllib.request',
         'urllib.error',
         'json',

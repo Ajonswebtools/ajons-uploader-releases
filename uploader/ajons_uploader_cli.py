@@ -307,6 +307,24 @@ def main(argv=None):
         if argv == ["--version"]:
             print("ajons-uploader " + VERSION)
             return 0
+        if argv == ["--help"]:
+            print("Usage: ajons-uploader <command> [args...]")
+            print()
+            print("Commands:")
+            print("  status      Show pairing and daemon status")
+            print("  pair        Pair this computer with Ajons")
+            print("  install     Install uploader to user PATH")
+            print("  uninstall   Remove uploader from user PATH")
+            print("  serve       Start upload daemon")
+            print("  cancel      Cancel upload job(s)")
+            print("  stop        Stop upload daemon")
+            print("  upload      Upload a file")
+            print("  upload-media  Upload a media file")
+            print()
+            print("Options:")
+            print("  --version   Show version and exit")
+            print("  --help      Show this help and exit")
+            return 0
         if argv and argv[0] == "status":
             return _status(argv)
         if argv and argv[0] == "pair":

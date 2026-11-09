@@ -336,16 +336,7 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _is_daemon_running() -> bool:
-    info = _read_daemon_info()
-    if not info:
-        return False
-    pid = info.get("pid")
-    if not pid or not _pid_alive(pid):
-        return False
-    sock_path = info.get("socket")
-    if sock_path and Path(sock_path).exists():
-        return True
-    return False
+    return _get_daemon_connection() is not None
 
 
 class TokenManager:

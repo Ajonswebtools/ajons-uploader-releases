@@ -11,7 +11,7 @@ UPLOADER_DIR = 'uploader'
 block_cipher = None
 
 a = Analysis(
-    ['uploader/ajons_uploader_cli.py'],
+    ['ajons_uploader_cli.py'],
     pathex=[os.path.abspath(UPLOADER_DIR)],
     binaries=[],
     datas=[],

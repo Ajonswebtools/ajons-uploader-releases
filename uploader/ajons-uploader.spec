@@ -5,16 +5,16 @@ import os
 block_cipher = None
 
 a = Analysis(
-    ['uploader/ajons_uploader_cli.py'],
+    ['ajons_uploader_cli.py'],
     pathex=['.'],
     binaries=[],
-    datas=[('uploader/security_redaction.py', 'uploader')],
+    datas=[('security_redaction.py', '.')],
     hiddenimports=[
-        'uploader.ajons_video_uploader',
-        'uploader.ajons_daemon',
-        'uploader.ajons_constants',
-        'uploader.ajons_utils',
-        'uploader.security_redaction',
+        'ajons_video_uploader',
+        'ajons_daemon',
+        'ajons_constants',
+        'ajons_utils',
+        'security_redaction',
         'urllib.request',
         'urllib.error',
         'json',

@@ -42,7 +42,7 @@ echo "$VERSION_OUT" | grep -q "^ajons-uploader ${EXPECTED_VERSION}$" || {
 echo "--version matches expected ${EXPECTED_VERSION}"
 
 echo "=== status --json ==="
-STATUS_JSON=$("$EXE" status --json) || true
+STATUS_JSON=$("$EXE" status --json)
 echo "$STATUS_JSON"
 python3 - "$STATUS_JSON" <<'PY'
 import json, sys
@@ -54,13 +54,10 @@ for key in ("token_valid", "needs_repair", "daemon_running"):
 print("status --json contains token_valid, needs_repair, daemon_running")
 PY
 
-# On Windows and macOS the CI runner has an OS keyring, so serve is run without
-# --allow-insecure-file. On Linux CI there is no keyring, so keep
-# --allow-insecure-file.
+echo "=== serve (stays running 10s) ==="
 if [ "$PLATFORM" = "linux" ]; then
-  SERVE_ARGS=(--allow-insecure-file)
+  "$EXE" serve --concurrency 1 --allow-insecure-file > serve.log 2>&1 &
 else
-  SERVE_ARGS=()
   echo "=== keyring read/write (same code path as daemon) ==="
   python3 - "$STORE_SERVICE" <<'PY'
 import keyring, sys
@@ -71,10 +68,8 @@ assert val == "dummy-secret", repr(val)
 keyring.delete_password(service, "smoke-test")
 print("keyring read/write OK")
 PY
+  "$EXE" serve --concurrency 1 > serve.log 2>&1 &
 fi
-
-echo "=== serve (stays running 10s) ==="
-"$EXE" serve --concurrency 1 "${SERVE_ARGS[@]}" > serve.log 2>&1 &
 SERVE_PID=$!
 sleep 10
 if ! kill -0 "$SERVE_PID" 2>/dev/null; then

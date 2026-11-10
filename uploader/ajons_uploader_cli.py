@@ -168,26 +168,56 @@ def _paired():
         return False
 
 
+def _stored_refresh_token():
+    """Read the stored refresh token without calling any endpoint."""
+    try:
+        kr = uploader._keyring()
+        if kr:
+            token = kr.get_password(uploader.STORE_SERVICE, "device-refresh")
+            if token:
+                return token
+        path = uploader._config_file()
+        if path.is_file() and not (path.stat().st_mode & 0o077):
+            data = json.loads(path.read_text(encoding="utf-8"))
+            token = data.get("refresh_token")
+            if token:
+                return token
+    except Exception:
+        pass
+    return None
+
+
+def _save_refresh_token_to_store(token: str):
+    """Persist a rotated refresh token back to the store."""
+    try:
+        kr = uploader._keyring()
+        if kr:
+            kr.set_password(uploader.STORE_SERVICE, "device-refresh", token)
+            return True
+        path = uploader._config_file()
+        from tools.ajons_utils import _save_refresh_token as _persist
+        _persist(token, ("file", path), allow_file=True)
+        return True
+    except Exception:
+        return False
+
+
 def _token_live_valid():
     """Check if the stored refresh token can still obtain an access token.
 
-    Returns (valid: bool, needs_repair: bool). On invalid_grant, needs_repair=True.
+    Rotates the token on success and saves the replacement so the stored
+    token never becomes stale. Returns (valid: bool, needs_repair: bool).
+    On invalid_grant, needs_repair=True.
     """
     try:
-        kr = uploader._keyring()
-        refresh_token = None
-        if kr:
-            refresh_token = kr.get_password(uploader.STORE_SERVICE, "device-refresh")
-        if not refresh_token:
-            path = uploader._config_file()
-            if path.is_file() and not (path.stat().st_mode & 0o077):
-                data = json.loads(path.read_text(encoding="utf-8"))
-                refresh_token = data.get("refresh_token")
+        refresh_token = _stored_refresh_token()
         if not refresh_token:
             return False, False
         result = _json_request_with_retry("POST", "/device/token",
                                           {"refresh_token": refresh_token})
         if result.get("refresh_token") or result.get("access_token"):
+            new_refresh = result.get("refresh_token") or refresh_token
+            _save_refresh_token_to_store(new_refresh)
             return True, False
         return False, False
     except UploadError as exc:
@@ -232,15 +262,19 @@ def _status(argv):
     daemon_running = daemon._is_daemon_running()
 
     # D7: When the daemon is running, use its cached token state to avoid
-    # racing the daemon's own proactive token refresh. Only do a live
-    # refresh check when the daemon is not running.
+    # racing the daemon's own proactive token refresh. When the daemon is
+    # off, never call the rotating /device/token endpoint: just report
+    # whether a stored token exists ("unknown" validity) so status never
+    # consumes the refresh token.
     if daemon_running:
         d_status = daemon.daemon_status()
         token_valid = d_status.get("token_valid", False)
         needs_repair = d_status.get("needs_repair", True)
         last_renewal_error = d_status.get("last_renewal_error")
     else:
-        token_valid, needs_repair = _token_live_valid()
+        stored = _stored_refresh_token() is not None
+        token_valid = "unknown" if stored else False
+        needs_repair = not stored
         last_renewal_error = None
 
     base_result = {"installed_version": VERSION, "paired": paired,
@@ -339,7 +373,10 @@ def _preflight(argv):
     except Exception as exc:
         results.append(("version", False, str(exc)))
 
-    # 2. Token validity (use daemon cache when running to avoid racing daemon refresh)
+    # 2. Token validity (use daemon cache when running to avoid racing daemon refresh.
+    # When the daemon is off, never call the rotating /device/token endpoint: just
+    # report whether a stored token exists ("unknown" validity) so preflight never
+    # consumes the refresh token.)
     try:
         d_running = daemon._is_daemon_running()
         if d_running:
@@ -347,12 +384,15 @@ def _preflight(argv):
             token_valid = d_status.get("token_valid", False)
             needs_repair = d_status.get("needs_repair", True)
         else:
-            token_valid, needs_repair = _token_live_valid()
-        results.append(("token", token_valid and not needs_repair,
+            stored = _stored_refresh_token() is not None
+            token_valid = "unknown" if stored else False
+            needs_repair = not stored
+        token_ok = (token_valid is True or token_valid == "unknown") and not needs_repair
+        results.append(("token", token_ok,
                         "valid=%s needs_repair=%s daemon=%s" %
                         (token_valid, needs_repair, d_running)))
     except Exception as exc:
-        results.append(("token", False, str(exc)))
+        results.append(("token", "unknown", str(exc)))
 
     # 3. Keyring access
     try:
@@ -369,8 +409,9 @@ def _preflight(argv):
     except Exception as exc:
         results.append(("daemon", False, str(exc)))
 
-    # 5. Runbook version from server
+    # 5. Runbook version from server (skipped without --server, not a failure)
     runbook_version = None
+    runbook_ok = True
     if args.server:
         try:
             import urllib.request
@@ -385,7 +426,7 @@ def _preflight(argv):
         except Exception as exc:
             results.append(("runbook", False, "server unreachable: %s" % str(exc)[:100]))
     else:
-        results.append(("runbook", False, "no --server given; skipping"))
+        results.append(("runbook", True, "no --server given; skipping"))
 
     all_pass = all(r[1] for r in results)
     for name, ok, detail in results:

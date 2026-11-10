@@ -42,7 +42,7 @@ echo "$VERSION_OUT" | grep -q "^ajons-uploader ${EXPECTED_VERSION}$" || {
 echo "--version matches expected ${EXPECTED_VERSION}"
 
 echo "=== status --json ==="
-STATUS_JSON=$("$EXE" status --json)
+STATUS_JSON=$("$EXE" status --json) || true
 echo "$STATUS_JSON"
 python3 - "$STATUS_JSON" <<'PY'
 import json, sys

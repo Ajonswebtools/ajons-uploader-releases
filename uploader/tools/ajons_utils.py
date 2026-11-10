@@ -9,7 +9,16 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from tools.security_redaction import redact_text
+try:
+    import fcntl
+except Exception:  # pragma: no cover - Unix without fcntl
+    fcntl = None
+try:
+    import msvcrt
+except Exception:  # pragma: no cover - non-Windows
+    msvcrt = None
+
+from security_redaction import redact_text
 
 from tools.ajons_constants import (
     BASE_URL,
@@ -78,6 +87,63 @@ def _config_file():
     return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "ajons" / "uploader" / "device.json"
 
 
+def _token_lock_path() -> Path:
+    return _config_file().parent / "token.lock"
+
+
+def _acquire_token_lock():
+    """Acquire an exclusive cross-process file lock on the stored refresh token.
+
+    Linux/macOS: fcntl.flock(LOCK_EX). Windows: msvcrt.locking(LK_LOCK).
+    Works between parent and child PyInstaller processes. Returns a file
+    descriptor to pass to _release_token_lock, or None if locking is unavailable.
+    """
+    lock_path = _token_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.name != "nt":
+        try:
+            os.chmod(lock_path.parent, 0o700)
+        except OSError:
+            pass
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    if os.name == "nt" and msvcrt is not None:
+        try:
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        except OSError:
+            os.close(fd)
+            return None
+    elif fcntl is not None and os.name != "nt":
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError:
+            os.close(fd)
+            return None
+    try:
+        os.chmod(str(lock_path), 0o600)
+    except OSError:
+        pass
+    return fd
+
+
+def _release_token_lock(fd):
+    if fd is None:
+        return
+    if os.name == "nt" and msvcrt is not None:
+        try:
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+    elif fcntl is not None and os.name != "nt":
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
 def _load_refresh_token(allow_file=False):
     kr = _keyring()
     if kr:
@@ -142,9 +208,33 @@ def _json_request(method, path, payload=None, bearer=None):
     except Exception:
         result = {}
     if status >= 400:
+        # D2: Log every failed HTTP request: status, endpoint path (no query string),
+        # and the redacted response body.
+        _log_failed_http(method, path, status, result)
         raise UploadError("Ajons request failed (HTTP %d): %s" %
                           (status, _safe_text(result.get("error", "request rejected"))))
     return result
+
+
+def _log_failed_http(method: str, path: str, status: int, body: dict):
+    """Append a redacted failed-HTTP-request entry to the uploader log."""
+    try:
+        from pathlib import Path
+        import time
+        from security_redaction import redact_text
+        # Extract endpoint path without query string
+        endpoint = path.split("?")[0]
+        log_dir = Path.home() / ".local" / "share" / "Ajons" / "logs"
+        if __import__("os").name == "nt":
+            log_dir = Path(__import__("os").environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "Ajons" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        entry = "\n===== %s =====\nHTTP %s %s -> %d\n%s\n" % (
+            time.strftime("%Y-%m-%d %H:%M:%S"), method, endpoint, status,
+            redact_text(json.dumps(body, separators=(",", ":"))[:2000]))
+        with (log_dir / "uploader.log").open("a", encoding="utf-8") as f:
+            f.write(entry)
+    except Exception:
+        pass
 
 
 _http_request = _request

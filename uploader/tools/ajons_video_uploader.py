@@ -20,14 +20,14 @@ import subprocess
 import shutil
 from pathlib import Path
 
-from tools.security_redaction import redact_text
+from security_redaction import redact_text
 
 from tools.ajons_constants import (
     BASE_URL,
     CHUNK,
     STORE_SERVICE,
     UPLOADER_VERSION,
-    UploadError,
+    UploadError as _BaseUploadError,
 )
 
 from tools.ajons_utils import (
@@ -89,7 +89,7 @@ def _write_worker_log(session_id, message):
         pass
 
 
-class UploadError(Exception):
+class UploadError(_BaseUploadError):
     pass
 
 
@@ -150,12 +150,17 @@ def pair(allow_insecure_file=False, device_name=None):
         time.sleep(interval)
         try:
             result = _json_request("POST", "/device/token", {"device_code": device_code})
-        except UploadError as exc:
+        except _BaseUploadError as exc:
             message = str(exc)
             if "authorization_pending" in message:
+                # D8: authorization_pending is normal polling. Log at debug only.
+                if os.environ.get("AJONS_DEBUG", "").strip().lower() in ("1", "true", "yes", "on"):
+                    print("pair: authorization_pending, continuing to poll...", file=sys.stderr)
                 continue
             if "slow_down" in message:
                 interval += 5
+                if os.environ.get("AJONS_DEBUG", "").strip().lower() in ("1", "true", "yes", "on"):
+                    print("pair: slow_down, increasing interval to %ds" % interval, file=sys.stderr)
                 continue
             raise
         refresh_token = result.get("refresh_token")
@@ -172,7 +177,10 @@ def pair(allow_insecure_file=False, device_name=None):
 
 
 def upload(session_id, file_path, allow_insecure_file=False):
-    """Upload a video file via the daemon. Auto-starts daemon if needed."""
+    """Upload a video file via the daemon. Queues the job and returns immediately.
+
+    Does NOT wait for completion. Callers should poll status separately.
+    """
     path = Path(file_path)
     if not path.is_file() or path.stat().st_size <= 0:
         raise UploadError("Video file does not exist or is empty.")
@@ -187,9 +195,7 @@ def upload(session_id, file_path, allow_insecure_file=False):
 
     job_id = result["job_id"]
     print(json.dumps({"type": "queued", "job_id": job_id, "session_id": session_id}, separators=(",", ":")), flush=True)
-
-    # Poll for completion
-    _poll_job_completion(job_id, session_id)
+    return job_id
 
 
 def _poll_job_completion(job_id: str, session_id: str):

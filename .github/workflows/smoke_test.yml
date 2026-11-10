@@ -8,6 +8,11 @@ on:
         required: false
         type: string
         default: 'windows,linux,macos-intel,macos-arm64'
+      expected_version:
+        description: 'Expected version string (e.g., v1.1.5 or 1.1.5)'
+        required: false
+        type: string
+        default: '1.1.5'
 
 permissions:
   contents: read
@@ -30,16 +35,16 @@ jobs:
           for P in "${PLATFORMS_ARRAY[@]}"; do
             case "$P" in
               windows)
-                MATRIX=$(echo "$MATRIX" | jq -c '.include += [{"os": "windows-latest", "binary_name": "ajons-uploader.exe", "platform": "windows"}]')
+                MATRIX=$(echo "$MATRIX" | jq -c '.include += [{"os": "windows-latest", "target": "windows", "binary_name": "ajons-uploader.exe", "platform": "windows"}]')
                 ;;
               linux)
-                MATRIX=$(echo "$MATRIX" | jq -c '.include += [{"os": "ubuntu-latest", "binary_name": "ajons-uploader", "platform": "linux"}]')
+                MATRIX=$(echo "$MATRIX" | jq -c '.include += [{"os": "ubuntu-latest", "target": "linux", "binary_name": "ajons-uploader", "platform": "linux"}]')
                 ;;
               macos-intel)
-                MATRIX=$(echo "$MATRIX" | jq -c '.include += [{"os": "macos-15-intel", "binary_name": "ajons-uploader", "platform": "macos"}]')
+                MATRIX=$(echo "$MATRIX" | jq -c '.include += [{"os": "macos-15-intel", "target": "macos-intel", "binary_name": "ajons-uploader", "platform": "macos"}]')
                 ;;
               macos-arm64)
-                MATRIX=$(echo "$MATRIX" | jq -c '.include += [{"os": "macos-latest", "binary_name": "ajons-uploader", "platform": "macos"}]')
+                MATRIX=$(echo "$MATRIX" | jq -c '.include += [{"os": "macos-latest", "target": "macos-arm64", "binary_name": "ajons-uploader", "platform": "macos"}]')
                 ;;
               *)
                 echo "Error: unknown platform '$P'" >&2
@@ -64,10 +69,11 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install build dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install pyinstaller==6.11.1
 
       - name: Install pywin32-ctypes for Windows keyring backend
         if: runner.os == 'Windows'
@@ -75,10 +81,10 @@ jobs:
 
       - name: Build with PyInstaller
         run: |
-          python -m PyInstaller uploader/ajons-uploader.spec --clean
+          pyinstaller ajons-uploader.spec --clean
 
       - name: Smoke test built binary
         shell: bash
         run: |
           chmod +x .github/scripts/smoke_test.sh
-          .github/scripts/smoke_test.sh "${{ matrix.binary_name }}" "$GITHUB_WORKSPACE" "${{ matrix.platform }}"
+          .github/scripts/smoke_test.sh "${{ matrix.binary_name }}" "$GITHUB_WORKSPACE" "${{ matrix.platform }}" "${{ github.event.inputs.expected_version || '1.1.5' }}"

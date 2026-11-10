@@ -9,6 +9,11 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+try:
+    import fcntl
+except Exception:  # pragma: no cover - Windows
+    fcntl = None
+
 from security_redaction import redact_text
 
 from tools.ajons_constants import (
@@ -76,6 +81,53 @@ def _config_file():
     if platform.system() == "Darwin":
         return Path.home() / "Library" / "Application Support" / "Ajons" / "uploader" / "device.json"
     return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "ajons" / "uploader" / "device.json"
+
+
+def _token_lock_path() -> Path:
+    return _config_file().parent / "token.lock"
+
+
+def _acquire_token_lock():
+    """Acquire an exclusive cross-process file lock on the stored refresh token.
+
+    Works between parent and child PyInstaller processes on Linux/macOS via
+    fcntl.flock. On Windows, fcntl is unavailable so the lock is advisory only
+    (the daemon lock file already serializes processes there).
+    Returns a file descriptor to pass to _release_token_lock, or None.
+    """
+    lock_path = _token_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.name != "nt":
+        try:
+            os.chmod(lock_path.parent, 0o700)
+        except OSError:
+            pass
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    if fcntl is not None and os.name != "nt":
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError:
+            os.close(fd)
+            return None
+    try:
+        os.chmod(str(lock_path), 0o600)
+    except OSError:
+        pass
+    return fd
+
+
+def _release_token_lock(fd):
+    if fd is None:
+        return
+    if fcntl is not None and os.name != "nt":
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
 
 
 def _load_refresh_token(allow_file=False):

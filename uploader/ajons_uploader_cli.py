@@ -17,6 +17,7 @@ from security_redaction import redact_text
 from tools import ajons_video_uploader as uploader
 from tools import ajons_daemon as daemon
 from tools.ajons_video_uploader import UploadError
+from tools.ajons_utils import _acquire_token_lock, _release_token_lock
 
 VERSION = uploader.UPLOADER_VERSION
 
@@ -206,9 +207,12 @@ def _token_live_valid():
     """Check if the stored refresh token can still obtain an access token.
 
     Rotates the token on success and saves the replacement so the stored
-    token never becomes stale. Returns (valid: bool, needs_repair: bool).
-    On invalid_grant, needs_repair=True.
+    token never becomes stale. A cross-process file lock serializes the
+    read-rotate-save cycle so parent and child PyInstaller processes never
+    consume the same refresh token concurrently. Returns (valid: bool,
+    needs_repair: bool). On invalid_grant, needs_repair=True.
     """
+    lock_fd = _acquire_token_lock()
     try:
         refresh_token = _stored_refresh_token()
         if not refresh_token:
@@ -227,6 +231,8 @@ def _token_live_valid():
         return False, False
     except Exception:
         return False, False
+    finally:
+        _release_token_lock(lock_fd)
 
 
 def _json_request_with_retry(method, path, payload):

@@ -27,7 +27,7 @@ from tools.ajons_constants import (
     CHUNK,
     STORE_SERVICE,
     UPLOADER_VERSION,
-    UploadError,
+    UploadError as _BaseUploadError,
 )
 
 from tools.ajons_utils import (
@@ -89,7 +89,7 @@ def _write_worker_log(session_id, message):
         pass
 
 
-class UploadError(Exception):
+class UploadError(_BaseUploadError):
     pass
 
 

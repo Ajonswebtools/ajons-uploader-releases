@@ -81,7 +81,7 @@ jobs:
 
       - name: Build with PyInstaller
         run: |
-          pyinstaller ajons-uploader.spec --clean
+          pyinstaller uploader/ajons-uploader.spec --clean
 
       - name: Smoke test built binary
         shell: bash

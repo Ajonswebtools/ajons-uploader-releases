@@ -5,9 +5,12 @@
 # confirm it stays running for 10s -> stop. Fails on any step failure.
 set -euo pipefail
 
-BINARY_NAME="${1:?usage: smoke_test.sh <binary_name> <repo_root> <platform>}"
-REPO_ROOT="${2:?usage: smoke_test.sh <binary_name> <repo_root> <platform>}"
+BINARY_NAME="${1:?usage: smoke_test.sh <binary_name> <repo_root> <platform> <expected_version>}"
+REPO_ROOT="${2:?usage: smoke_test.sh <binary_name> <repo_root> <platform> <expected_version>}"
 PLATFORM="${3:-linux}"
+EXPECTED_VERSION="${4:-1.1.5}"
+
+STORE_SERVICE="com.ajonswebtools.ajons-uploader"
 
 BIN_PATH="$REPO_ROOT/dist/$BINARY_NAME"
 if [ ! -f "$BIN_PATH" ]; then
@@ -32,7 +35,11 @@ EXE="./$BINARY_NAME"
 echo "=== --version ==="
 VERSION_OUT=$("$EXE" --version)
 echo "$VERSION_OUT"
-echo "$VERSION_OUT" | grep -q "^ajons-uploader 1\.1\.2$"
+echo "$VERSION_OUT" | grep -q "^ajons-uploader ${EXPECTED_VERSION}$" || {
+  echo "ERROR: --version output '$VERSION_OUT' does not match expected 'ajons-uploader ${EXPECTED_VERSION}'" >&2
+  exit 1
+}
+echo "--version matches expected ${EXPECTED_VERSION}"
 
 echo "=== status --json ==="
 STATUS_JSON=$("$EXE" status --json)
@@ -49,15 +56,15 @@ PY
 
 # On Windows and macOS the CI runner has an OS keyring, so serve is run without
 # --allow-insecure-file. On Linux CI there is no keyring, so keep
-# --allow-insecure-file. Never print secrets/tokens to logs.
+# --allow-insecure-file.
 if [ "$PLATFORM" = "linux" ]; then
-  SERVE_EXTRA="--allow-insecure-file"
+  SERVE_ARGS=(--allow-insecure-file)
 else
-  SERVE_EXTRA=""
-  echo "=== keyring read/write (same code path as daemon; dummy secret only) ==="
-  python3 - <<'PY'
-import keyring
-service = "com.ajonswebtools.ajons-uploader"
+  SERVE_ARGS=()
+  echo "=== keyring read/write (same code path as daemon) ==="
+  python3 - "$STORE_SERVICE" <<'PY'
+import keyring, sys
+service = sys.argv[1]
 keyring.set_password(service, "smoke-test", "dummy-secret")
 val = keyring.get_password(service, "smoke-test")
 assert val == "dummy-secret", repr(val)
@@ -67,7 +74,7 @@ PY
 fi
 
 echo "=== serve (stays running 10s) ==="
-"$EXE" serve --concurrency 1 $SERVE_EXTRA > serve.log 2>&1 &
+"$EXE" serve --concurrency 1 "${SERVE_ARGS[@]}" > serve.log 2>&1 &
 SERVE_PID=$!
 sleep 10
 if ! kill -0 "$SERVE_PID" 2>/dev/null; then

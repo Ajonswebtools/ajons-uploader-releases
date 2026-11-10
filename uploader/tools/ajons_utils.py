@@ -11,8 +11,12 @@ from pathlib import Path
 
 try:
     import fcntl
-except Exception:  # pragma: no cover - Windows
+except Exception:  # pragma: no cover - Unix without fcntl
     fcntl = None
+try:
+    import msvcrt
+except Exception:  # pragma: no cover - non-Windows
+    msvcrt = None
 
 from security_redaction import redact_text
 
@@ -90,10 +94,9 @@ def _token_lock_path() -> Path:
 def _acquire_token_lock():
     """Acquire an exclusive cross-process file lock on the stored refresh token.
 
-    Works between parent and child PyInstaller processes on Linux/macOS via
-    fcntl.flock. On Windows, fcntl is unavailable so the lock is advisory only
-    (the daemon lock file already serializes processes there).
-    Returns a file descriptor to pass to _release_token_lock, or None.
+    Linux/macOS: fcntl.flock(LOCK_EX). Windows: msvcrt.locking(LK_LOCK).
+    Works between parent and child PyInstaller processes. Returns a file
+    descriptor to pass to _release_token_lock, or None if locking is unavailable.
     """
     lock_path = _token_lock_path()
     lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -103,7 +106,13 @@ def _acquire_token_lock():
         except OSError:
             pass
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-    if fcntl is not None and os.name != "nt":
+    if os.name == "nt" and msvcrt is not None:
+        try:
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        except OSError:
+            os.close(fd)
+            return None
+    elif fcntl is not None and os.name != "nt":
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
         except OSError:
@@ -119,7 +128,12 @@ def _acquire_token_lock():
 def _release_token_lock(fd):
     if fd is None:
         return
-    if fcntl is not None and os.name != "nt":
+    if os.name == "nt" and msvcrt is not None:
+        try:
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+    elif fcntl is not None and os.name != "nt":
         try:
             fcntl.flock(fd, fcntl.LOCK_UN)
         except OSError:

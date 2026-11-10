@@ -40,8 +40,8 @@ from tools.ajons_utils import (
 )
 
 
-DAEMON_VERSION = "1.1.3"
-UPLOADER_VERSION = "1.1.3"
+DAEMON_VERSION = "1.1.5"
+UPLOADER_VERSION = "1.1.5"
 DAEMON_SOCKET_NAME = "ajons-uploader.sock"
 DAEMON_INFO_FILE = "daemon.json"
 DAEMON_LOCK_FILE = "daemon.lock"

@@ -150,7 +150,7 @@ def pair(allow_insecure_file=False, device_name=None):
         time.sleep(interval)
         try:
             result = _json_request("POST", "/device/token", {"device_code": device_code})
-        except UploadError as exc:
+        except _BaseUploadError as exc:
             message = str(exc)
             if "authorization_pending" in message:
                 # D8: authorization_pending is normal polling. Log at debug only.

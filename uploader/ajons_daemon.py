@@ -40,8 +40,8 @@ from tools.ajons_utils import (
 )
 
 
-DAEMON_VERSION = "1.1.2"
-UPLOADER_VERSION = "1.1.2"
+DAEMON_VERSION = "1.1.8"
+UPLOADER_VERSION = "1.1.8"
 DAEMON_SOCKET_NAME = "ajons-uploader.sock"
 DAEMON_INFO_FILE = "daemon.json"
 DAEMON_LOCK_FILE = "daemon.lock"
@@ -64,6 +64,31 @@ class TokenState:
     allow_file: bool = False
     needs_repair: bool = False
     last_renewal_error: Optional[str] = None
+
+
+@dataclass
+class MediaUploadJob:
+    job_id: str
+    session_id: str
+    file_path: str
+    media_type: str  # "thumbnail", "banner", "watermark"
+    target_video_id: Optional[str] = None
+    status: str = "queued"
+    created_at: float = field(default_factory=time.time)
+    started_at: Optional[float] = None
+    completed_at: Optional[float] = None
+    bytes_uploaded: int = 0
+    total_bytes: int = 0
+    speed_bps: float = 0
+    eta_seconds: Optional[float] = None
+    retry_count: int = 0
+    last_error: Optional[str] = None
+    cancel_requested: bool = False
+
+    def to_dict(self):
+        d = asdict(self)
+        return d
+
 
 @dataclass
 class UploadJob:
@@ -143,6 +168,15 @@ class DaemonClient:
 
     def submit_upload(self, file_path: str, session_id: str = None, **kwargs) -> dict:
         return self._send({"cmd": "upload", "file_path": file_path, "session_id": session_id, **kwargs})
+
+    def submit_media(self, file_path: str, session_id: str, media_type: str, target_video_id: str = None) -> dict:
+        return self._send({
+            "cmd": "upload-media",
+            "file_path": file_path,
+            "session_id": session_id,
+            "media_type": media_type,
+            "target_video_id": target_video_id
+        })
 
     def status(self, session_id: str = None) -> dict:
         return self._send({"cmd": "status", "session_id": session_id})
@@ -510,6 +544,9 @@ class UploadQueue:
             job.status = "done"
             job.completed_at = time.monotonic()
             job.bytes_uploaded = size
+            token = await self._token_manager.ensure_valid_token()
+            if not token:
+                raise UploadError("Lost device credential during upload")
             await _complete_with_token(job.session_id, job.video_id, token)
             return
         job.bytes_uploaded = offset
@@ -551,6 +588,9 @@ class UploadQueue:
                         job.status = "done"
                         job.completed_at = time.monotonic()
                         job.bytes_uploaded = size
+                        token = await self._token_manager.ensure_valid_token()
+                        if not token:
+                            raise UploadError("Lost device credential during upload")
                         await _complete_with_token(job.session_id, video_id, token)
                         return
 
@@ -562,6 +602,9 @@ class UploadQueue:
                         position = _probe_with_token(uri, access_token, size)
                         offset = position.get("offset", 0)
                     job.bytes_uploaded = offset
+                    token = await self._token_manager.ensure_valid_token()
+                    if not token:
+                        raise UploadError("Lost device credential during upload")
                     await _progress_with_token(job.session_id, offset, token)
                     continue
 
@@ -585,8 +628,9 @@ class UploadQueue:
             job.last_error = "Upload incomplete"
 
 
-def _json_request_with_token(method: str, path: str, payload: dict, token: str) -> dict:
-    status, headers, body = _request(method, BASE_URL + path, payload=payload, bearer=token, timeout=30)
+async def _json_request_with_token(method: str, path: str, payload: dict, token: str) -> dict:
+    status, headers, body = await asyncio.to_thread(
+        _request, method, BASE_URL + path, payload=payload, bearer=token, timeout=30)
     if status >= 400:
         err = json.loads(body).get("error", "request rejected") if body else "request rejected"
         raise UploadError(f"Server error: {err}")
@@ -628,6 +672,159 @@ async def _complete_with_token(session_id: str, video_id: str, token: str):
     await _json_request_with_token("POST", f"/uploads/{session_id}/complete", {"video_id": video_id}, token)
 
 
+async def _claim_media_with_token(session_id: str, media_type: str, file_size: int, token: str) -> dict:
+    """Claim a media upload session with the server."""
+    return await _json_request_with_token("POST", f"/uploads/{session_id}/media/claim", {
+        "media_type": media_type,
+        "declared_size": file_size
+    }, token)
+
+
+async def _complete_media_with_token(session_id: str, media_type: str, token: str) -> dict:
+    """Complete a media upload session with the server."""
+    return await _json_request_with_token("POST", f"/uploads/{session_id}/media/complete", {
+        "media_type": media_type
+    }, token)
+
+
+class MediaUploadQueue:
+    def __init__(self, concurrency: int = 1):
+        self.concurrency = concurrency
+        self.jobs: dict[str, MediaUploadJob] = {}
+        self._running = 0
+        self._semaphore: Optional[asyncio.Semaphore] = None
+        self._worker_tasks: list[asyncio.Task] = []
+
+    async def start(self, token_manager: TokenManager):
+        self._semaphore = asyncio.Semaphore(self.concurrency)
+        self._token_manager = token_manager
+
+    async def stop(self):
+        for job in self.jobs.values():
+            job.cancel_requested = True
+        for task in self._worker_tasks:
+            task.cancel()
+        await asyncio.gather(*self._worker_tasks, return_exceptions=True)
+
+    def submit(self, job: MediaUploadJob) -> str:
+        self.jobs[job.job_id] = job
+        return job.job_id
+
+    def get_job(self, job_id: str) -> Optional[MediaUploadJob]:
+        return self.jobs.get(job_id)
+
+    def list_jobs(self) -> list[dict]:
+        return [j.to_dict() for j in self.jobs.values()]
+
+    async def process(self, job: MediaUploadJob):
+        async with self._semaphore:
+            self._running += 1
+            job.status = "claiming"
+            job.started_at = time.monotonic()
+            try:
+                await self._run_media_job(job)
+            except asyncio.CancelledError:
+                job.status = "cancelled"
+                raise
+            except Exception as e:
+                job.status = "failed"
+                job.last_error = str(e)
+                job.completed_at = time.monotonic()
+            finally:
+                self._running -= 1
+
+    async def _run_media_job(self, job: MediaUploadJob):
+        token = await self._token_manager.ensure_valid_token()
+        if not token:
+            raise UploadError("No valid device credential; re-pair required")
+
+        job.status = "uploading"
+        path = Path(job.file_path)
+        size = path.stat().st_size
+        
+        # Claim media upload session
+        claim_resp = await _claim_media_with_token(job.session_id, job.media_type, size, token)
+        uri = claim_resp["upload_url"]
+        access_token = claim_resp["access_token"]
+        google_expiry = time.monotonic() + int(claim_resp.get("expires_in", 3600))
+
+        job.total_bytes = size
+
+        # Probe for existing upload position
+        position = _probe_with_token(uri, access_token, size)
+        offset = position.get("offset", 0)
+        
+        job.bytes_uploaded = offset
+
+        with path.open("rb") as f:
+            while offset < size and not job.cancel_requested:
+                if time.monotonic() >= google_expiry - 60:
+                    token = await self._token_manager.ensure_valid_token()
+                    if not token:
+                        raise UploadError("Lost device credential during upload")
+                    # Re-claim to get fresh token (media uploads don't have renew endpoint)
+                    claim_resp = await _claim_media_with_token(job.session_id, job.media_type, size, token)
+                    uri = claim_resp["upload_url"]
+                    access_token = claim_resp["access_token"]
+                    google_expiry = time.monotonic() + int(claim_resp.get("expires_in", 3600))
+
+                f.seek(offset)
+                chunk = f.read(min(CHUNK, size - offset))
+                end = offset + len(chunk) - 1
+
+                status, headers, body = await asyncio.to_thread(
+                    _request,
+                    "PUT", uri, bearer=access_token, data=chunk, headers={
+                        "Content-Length": str(len(chunk)),
+                        "Content-Range": f"bytes {offset}-{end}/{size}",
+                        "Content-Type": "application/octet-stream",
+                    }, timeout=180
+                )
+
+                if status in (200, 201):
+                    job.bytes_uploaded = size
+                    job.status = "done"
+                    job.completed_at = time.monotonic()
+                    # Complete the media upload
+                    token = await self._token_manager.ensure_valid_token()
+                    if not token:
+                        raise UploadError("Lost device credential during upload")
+                    await _complete_media_with_token(job.session_id, job.media_type, token)
+                    return
+
+                if status == 308:
+                    range_header = headers.get("Range", "")
+                    try:
+                        offset = int(range_header.rsplit("-", 1)[1]) + 1 if range_header else 0
+                    except Exception:
+                        position = _probe_with_token(uri, access_token, size)
+                        offset = position.get("offset", 0)
+                    job.bytes_uploaded = offset
+                    token = await self._token_manager.ensure_valid_token()
+                    if not token:
+                        raise UploadError("Lost device credential during upload")
+                    continue
+
+                if status in (401, 403):
+                    token = await self._token_manager.ensure_valid_token()
+                    if not token:
+                        raise UploadError("Device credential invalidated during upload")
+                    continue
+
+                if status in (500, 502, 503, 504):
+                    job.retry_count += 1
+                    await asyncio.sleep(min(5 * (2 ** (job.retry_count - 1)), 300))
+                    continue
+
+                raise UploadError(f"Media upload failed: HTTP {status}")
+
+        if job.cancel_requested:
+            job.status = "cancelled"
+        elif job.status != "done":
+            job.status = "failed"
+            job.last_error = "Media upload incomplete"
+
+
 class DaemonServer:
     def __init__(self, concurrency: int = DEFAULT_CONCURRENCY, allow_file: bool = False):
         self.concurrency = concurrency
@@ -637,6 +834,7 @@ class DaemonServer:
         self.secret = None
         self.token_manager = TokenManager(allow_file)
         self.queue = UploadQueue(concurrency)
+        self.media_queue = MediaUploadQueue(1)  # Media uploads are sequential
         self._server: Optional[asyncio.Server] = None
         self._running = False
         self.stop_event: Optional[asyncio.Event] = None
@@ -672,6 +870,7 @@ class DaemonServer:
 
         await self.token_manager.start_proactive_renewal()
         await self.queue.start(self.token_manager)
+        await self.media_queue.start(self.token_manager)
 
         _write_daemon_info(self.socket_path, os.getpid(), self.concurrency, self.port)
         _daemon_pid_path().write_text(str(os.getpid()))
@@ -682,6 +881,7 @@ class DaemonServer:
     async def stop(self):
         self._running = False
         await self.queue.stop()
+        await self.media_queue.stop()
         self.token_manager.stop_proactive_renewal()
         if self._server:
             self._server.close()
@@ -728,6 +928,8 @@ class DaemonServer:
         cmd = request.get("cmd")
         if cmd == "upload":
             return await self._handle_upload(request)
+        elif cmd == "upload-media":
+            return await self._handle_upload_media(request)
         elif cmd == "status":
             return await self._handle_status(request)
         elif cmd == "cancel":
@@ -771,11 +973,46 @@ class DaemonServer:
         asyncio.create_task(self.queue.process(job))
         return {"job_id": job.job_id, "status": "queued"}
 
+    async def _handle_upload_media(self, request: dict) -> dict:
+        file_path = request.get("file_path")
+        session_id = request.get("session_id")
+        media_type = request.get("media_type")
+        target_video_id = request.get("target_video_id")
+        
+        if not file_path or not Path(file_path).is_file():
+            return {"error": "File not found"}
+
+        if not session_id:
+            return {"error": "session_id required"}
+
+        if not media_type or media_type not in ("thumbnail", "banner", "watermark"):
+            return {"error": "Invalid media_type; must be thumbnail, banner, or watermark"}
+
+        # Check for existing media job for this session/media_type
+        for job in self.media_queue.list_jobs():
+            if job["session_id"] == session_id and job.get("media_type") == media_type and job["status"] in (
+                "queued", "claiming", "uploading", "done"
+            ):
+                return {"job_id": job["job_id"], "status": job["status"], "existing": True}
+
+        job = MediaUploadJob(
+            job_id=uuid.uuid4().hex[:12],
+            session_id=session_id,
+            file_path=file_path,
+            media_type=media_type,
+            target_video_id=target_video_id,
+        )
+        self.media_queue.submit(job)
+        asyncio.create_task(self.media_queue.process(job))
+        return {"job_id": job.job_id, "status": "queued"}
+
     async def _handle_status(self, request: dict) -> dict:
         session_id = request.get("session_id")
         jobs = self.queue.list_jobs()
+        media_jobs = self.media_queue.list_jobs()
         if session_id:
             jobs = [j for j in jobs if j["session_id"] == session_id]
+            media_jobs = [j for j in media_jobs if j["session_id"] == session_id]
 
         token_valid = self.token_manager.state is not None and not self.token_manager.state.needs_repair
         return {
@@ -784,13 +1021,16 @@ class DaemonServer:
             "needs_repair": self.token_manager.state.needs_repair if self.token_manager.state else True,
             "last_renewal_error": self.token_manager.state.last_renewal_error if self.token_manager.state else None,
             "concurrency": self.concurrency,
-            "running": self.queue._running,
+            "running": self.queue._running + self.media_queue._running,
             "jobs": jobs,
+            "media_jobs": media_jobs,
         }
 
     async def _handle_cancel(self, request: dict) -> dict:
         job_id = request.get("job_id")
         job = self.queue.get_job(job_id)
+        if not job:
+            job = self.media_queue.get_job(job_id)
         if not job:
             return {"error": "Job not found"}
         job.cancel_requested = True
@@ -804,7 +1044,7 @@ class DaemonServer:
     async def _handle_pair(self, request: dict) -> dict:
         device_name = request.get("device_name") or platform.node() or "Ajons uploader"
         try:
-            response = _json_request_with_token("POST", "/device/code", {
+            response = await _json_request_with_token("POST", "/device/code", {
                 "device_name": device_name,
                 "os": platform.platform()[:80],
             }, "")
@@ -823,7 +1063,7 @@ class DaemonServer:
         while time.monotonic() < deadline:
             await asyncio.sleep(interval)
             try:
-                result = _json_request_with_token("POST", "/device/token", {"device_code": device_code}, "")
+                result = await _json_request_with_token("POST", "/device/token", {"device_code": device_code}, "")
             except UploadError as e:
                 msg = str(e)
                 if "authorization_pending" in msg:
@@ -912,6 +1152,14 @@ def daemon_submit_upload(file_path: str, session_id: str, **kwargs) -> dict:
         return {"error": "Daemon not running"}
     client = DaemonClient(conn)
     return client.submit_upload(file_path, session_id, **kwargs)
+
+
+def daemon_submit_media(file_path: str, session_id: str, media_type: str, target_video_id: str = None) -> dict:
+    conn = _get_daemon_connection()
+    if not conn:
+        return {"error": "Daemon not running"}
+    client = DaemonClient(conn)
+    return client.submit_media(file_path, session_id, media_type, target_video_id)
 
 
 def daemon_cancel(job_id: str) -> dict:

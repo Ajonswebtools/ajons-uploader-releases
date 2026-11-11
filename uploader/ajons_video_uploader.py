@@ -27,7 +27,7 @@ from tools.ajons_constants import (
     CHUNK,
     STORE_SERVICE,
     UPLOADER_VERSION,
-    UploadError,
+    UploadError as _BaseUploadError,
 )
 
 from tools.ajons_utils import (
@@ -89,7 +89,7 @@ def _write_worker_log(session_id, message):
         pass
 
 
-class UploadError(Exception):
+class UploadError(_BaseUploadError):
     pass
 
 
@@ -150,7 +150,7 @@ def pair(allow_insecure_file=False, device_name=None):
         time.sleep(interval)
         try:
             result = _json_request("POST", "/device/token", {"device_code": device_code})
-        except UploadError as exc:
+        except _BaseUploadError as exc:
             message = str(exc)
             if "authorization_pending" in message:
                 # D8: authorization_pending is normal polling. Log at debug only.
@@ -236,7 +236,7 @@ def upload_worker(session_id, file_path, allow_insecure_file=False):
     return upload(session_id, file_path, allow_insecure_file)
 
 
-def upload_media(session_id, file_path, allow_insecure_file=False):
+def upload_media(session_id, file_path, media_type="thumbnail", target_video_id=None, allow_insecure_file=False):
     """Upload a media file (thumbnail/banner/watermark) via the daemon."""
     path = Path(file_path)
     if not path.is_file() or path.stat().st_size <= 0:
@@ -245,10 +245,10 @@ def upload_media(session_id, file_path, allow_insecure_file=False):
     if not daemon._ensure_daemon_running(allow_insecure_file):
         raise UploadError("Failed to start upload daemon. Try running 'ajons-uploader serve' manually.")
 
-    # For media uploads, we need a different endpoint - use the daemon's upload with media flag
-    # This is a simplified version; the daemon would need media upload support
-    # For now, fall back to direct implementation but using daemon token
-    raise UploadError("Media upload not yet supported via daemon. Use direct mode.")
+    result = daemon.daemon_submit_media(file_path, session_id, media_type, target_video_id)
+    if "error" in result:
+        raise UploadError(result["error"])
+    return result
 
 
 # --- Status and utilities (delegates to daemon) ------------------------------------

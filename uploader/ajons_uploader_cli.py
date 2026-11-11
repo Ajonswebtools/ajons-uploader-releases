@@ -494,6 +494,9 @@ def _upload_media(argv):
     parser = argparse.ArgumentParser(prog="ajons-uploader upload-media")
     parser.add_argument("--session", required=True)
     parser.add_argument("--file", required=True)
+    parser.add_argument("--media-type", choices=["thumbnail", "banner", "watermark"], default="thumbnail",
+                        help="Type of media to upload (default: thumbnail)")
+    parser.add_argument("--video-id", help="Target video ID (required for thumbnail/watermark)")
     parser.add_argument("--allow-insecure-file", action="store_true",
                         help="Use a previously opted-in 0600 config-file credential fallback")
     args = parser.parse_args(argv)
@@ -501,7 +504,7 @@ def _upload_media(argv):
     log_path = _log_path()
     debug = _debug_enabled()
     try:
-        uploader.upload_media(args.session, args.file, args.allow_insecure_file)
+        uploader.upload_media(args.session, args.file, args.media_type, args.video_id, args.allow_insecure_file)
     except UploadError as exc:
         sys.stderr.write(str(exc) + "\n")
         return 1

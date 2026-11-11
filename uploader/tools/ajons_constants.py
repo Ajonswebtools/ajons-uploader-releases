@@ -2,7 +2,7 @@
 BASE_URL = "https://mcp.ajonswebtools.com"
 CHUNK = 8 * 1024 * 1024
 STORE_SERVICE = "com.ajonswebtools.ajons-uploader"
-UPLOADER_VERSION = "1.1.6"
+UPLOADER_VERSION = "1.1.7"
 
 
 class UploadError(Exception):

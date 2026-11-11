@@ -40,8 +40,8 @@ from tools.ajons_utils import (
 )
 
 
-DAEMON_VERSION = "1.1.6"
-UPLOADER_VERSION = "1.1.6"
+DAEMON_VERSION = "1.1.7"
+UPLOADER_VERSION = "1.1.7"
 DAEMON_SOCKET_NAME = "ajons-uploader.sock"
 DAEMON_INFO_FILE = "daemon.json"
 DAEMON_LOCK_FILE = "daemon.lock"
@@ -510,6 +510,9 @@ class UploadQueue:
             job.status = "done"
             job.completed_at = time.monotonic()
             job.bytes_uploaded = size
+            token = await self._token_manager.ensure_valid_token()
+            if not token:
+                raise UploadError("Lost device credential during upload")
             await _complete_with_token(job.session_id, job.video_id, token)
             return
         job.bytes_uploaded = offset
@@ -551,6 +554,9 @@ class UploadQueue:
                         job.status = "done"
                         job.completed_at = time.monotonic()
                         job.bytes_uploaded = size
+                        token = await self._token_manager.ensure_valid_token()
+                        if not token:
+                            raise UploadError("Lost device credential during upload")
                         await _complete_with_token(job.session_id, video_id, token)
                         return
 
@@ -562,6 +568,9 @@ class UploadQueue:
                         position = _probe_with_token(uri, access_token, size)
                         offset = position.get("offset", 0)
                     job.bytes_uploaded = offset
+                    token = await self._token_manager.ensure_valid_token()
+                    if not token:
+                        raise UploadError("Lost device credential during upload")
                     await _progress_with_token(job.session_id, offset, token)
                     continue
 

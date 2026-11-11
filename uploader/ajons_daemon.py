@@ -683,7 +683,8 @@ async def _claim_media_with_token(session_id: str, media_type: str, file_size: i
 async def _complete_media_with_token(session_id: str, media_type: str, token: str) -> dict:
     """Complete a media upload session with the server."""
     return await _json_request_with_token("POST", f"/media-uploads/{session_id}/complete", {
-        "media_type": media_type
+        "media_type": media_type,
+        "google_status": 200
     }, token)
 
 
@@ -741,88 +742,66 @@ class MediaUploadQueue:
         job.status = "uploading"
         path = Path(job.file_path)
         size = path.stat().st_size
-        
+
         # Claim media upload session
         claim_resp = await _claim_media_with_token(job.session_id, job.media_type, size, token)
         uri = claim_resp["upload_url"]
         access_token = claim_resp["access_token"]
-        google_expiry = time.monotonic() + int(claim_resp.get("expires_in", 3600))
 
         job.total_bytes = size
 
-        # Probe for existing upload position
-        position = _probe_with_token(uri, access_token, size)
-        offset = position.get("offset", 0)
-        
-        job.bytes_uploaded = offset
+        # Media uploads use uploadType=media (simple upload), not resumable.
+        # Send the entire file in a single POST request.
+        ext = path.suffix.lower()
+        content_type = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".webp": "image/webp",
+            ".bmp": "image/bmp",
+        }.get(ext, "application/octet-stream")
 
-        with path.open("rb") as f:
-            while offset < size and not job.cancel_requested:
-                if time.monotonic() >= google_expiry - 60:
-                    token = await self._token_manager.ensure_valid_token()
-                    if not token:
-                        raise UploadError("Lost device credential during upload")
-                    # Re-claim to get fresh token (media uploads don't have renew endpoint)
-                    claim_resp = await _claim_media_with_token(job.session_id, job.media_type, size, token)
-                    uri = claim_resp["upload_url"]
-                    access_token = claim_resp["access_token"]
-                    google_expiry = time.monotonic() + int(claim_resp.get("expires_in", 3600))
+        data = path.read_bytes()
 
-                f.seek(offset)
-                chunk = f.read(min(CHUNK, size - offset))
-                end = offset + len(chunk) - 1
+        for attempt in range(3):
+            if attempt > 0:
+                await asyncio.sleep(min(5 * (2 ** (attempt - 1)), 300))
+                token = await self._token_manager.ensure_valid_token()
+                if not token:
+                    raise UploadError("Lost device credential during upload")
+                claim_resp = await _claim_media_with_token(job.session_id, job.media_type, size, token)
+                uri = claim_resp["upload_url"]
+                access_token = claim_resp["access_token"]
 
-                status, headers, body = await asyncio.to_thread(
-                    _request,
-                    "PUT", uri, bearer=access_token, data=chunk, headers={
-                        "Content-Length": str(len(chunk)),
-                        "Content-Range": f"bytes {offset}-{end}/{size}",
-                        "Content-Type": "application/octet-stream",
-                    }, timeout=180
-                )
+            status, headers, body = await asyncio.to_thread(
+                _request,
+                "POST", uri, bearer=access_token, data=data, headers={
+                    "Content-Length": str(size),
+                    "Content-Type": content_type,
+                }, timeout=180
+            )
 
-                if status in (200, 201):
-                    job.bytes_uploaded = size
-                    job.status = "done"
-                    job.completed_at = time.monotonic()
-                    # Complete the media upload
-                    token = await self._token_manager.ensure_valid_token()
-                    if not token:
-                        raise UploadError("Lost device credential during upload")
-                    await _complete_media_with_token(job.session_id, job.media_type, token)
-                    return
+            if status in (200, 201):
+                job.bytes_uploaded = size
+                job.status = "done"
+                job.completed_at = time.monotonic()
+                token = await self._token_manager.ensure_valid_token()
+                if not token:
+                    raise UploadError("Lost device credential during upload")
+                await _complete_media_with_token(job.session_id, job.media_type, token)
+                return
 
-                if status == 308:
-                    range_header = headers.get("Range", "")
-                    try:
-                        offset = int(range_header.rsplit("-", 1)[1]) + 1 if range_header else 0
-                    except Exception:
-                        position = _probe_with_token(uri, access_token, size)
-                        offset = position.get("offset", 0)
-                    job.bytes_uploaded = offset
-                    token = await self._token_manager.ensure_valid_token()
-                    if not token:
-                        raise UploadError("Lost device credential during upload")
-                    continue
+            if status in (401, 403):
+                continue
 
-                if status in (401, 403):
-                    token = await self._token_manager.ensure_valid_token()
-                    if not token:
-                        raise UploadError("Device credential invalidated during upload")
-                    continue
+            if status in (500, 502, 503, 504):
+                continue
 
-                if status in (500, 502, 503, 504):
-                    job.retry_count += 1
-                    await asyncio.sleep(min(5 * (2 ** (job.retry_count - 1)), 300))
-                    continue
+            raise UploadError(f"Media upload failed: HTTP {status}")
 
-                raise UploadError(f"Media upload failed: HTTP {status}")
-
-        if job.cancel_requested:
-            job.status = "cancelled"
-        elif job.status != "done":
-            job.status = "failed"
-            job.last_error = "Media upload incomplete"
+        job.status = "failed"
+        job.last_error = "Media upload failed after retries"
+        job.completed_at = time.monotonic()
 
 
 class DaemonServer:

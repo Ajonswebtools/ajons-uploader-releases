@@ -236,7 +236,7 @@ def upload_worker(session_id, file_path, allow_insecure_file=False):
     return upload(session_id, file_path, allow_insecure_file)
 
 
-def upload_media(session_id, file_path, allow_insecure_file=False):
+def upload_media(session_id, file_path, media_type="thumbnail", target_video_id=None, allow_insecure_file=False):
     """Upload a media file (thumbnail/banner/watermark) via the daemon."""
     path = Path(file_path)
     if not path.is_file() or path.stat().st_size <= 0:
@@ -245,10 +245,10 @@ def upload_media(session_id, file_path, allow_insecure_file=False):
     if not daemon._ensure_daemon_running(allow_insecure_file):
         raise UploadError("Failed to start upload daemon. Try running 'ajons-uploader serve' manually.")
 
-    # For media uploads, we need a different endpoint - use the daemon's upload with media flag
-    # This is a simplified version; the daemon would need media upload support
-    # For now, fall back to direct implementation but using daemon token
-    raise UploadError("Media upload not yet supported via daemon. Use direct mode.")
+    result = daemon.daemon_submit_media(file_path, session_id, media_type, target_video_id)
+    if "error" in result:
+        raise UploadError(result["error"])
+    return result
 
 
 # --- Status and utilities (delegates to daemon) ------------------------------------

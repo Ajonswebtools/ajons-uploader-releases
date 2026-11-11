@@ -674,7 +674,7 @@ async def _complete_with_token(session_id: str, video_id: str, token: str):
 
 async def _claim_media_with_token(session_id: str, media_type: str, file_size: int, token: str) -> dict:
     """Claim a media upload session with the server."""
-    return await _json_request_with_token("POST", f"/uploads/{session_id}/media/claim", {
+    return await _json_request_with_token("POST", f"/media-uploads/{session_id}/claim", {
         "media_type": media_type,
         "declared_size": file_size
     }, token)
@@ -682,7 +682,7 @@ async def _claim_media_with_token(session_id: str, media_type: str, file_size: i
 
 async def _complete_media_with_token(session_id: str, media_type: str, token: str) -> dict:
     """Complete a media upload session with the server."""
-    return await _json_request_with_token("POST", f"/uploads/{session_id}/media/complete", {
+    return await _json_request_with_token("POST", f"/media-uploads/{session_id}/complete", {
         "media_type": media_type
     }, token)
 

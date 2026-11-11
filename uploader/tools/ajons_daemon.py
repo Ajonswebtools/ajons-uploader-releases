@@ -40,8 +40,8 @@ from tools.ajons_utils import (
 )
 
 
-DAEMON_VERSION = "1.1.5"
-UPLOADER_VERSION = "1.1.5"
+DAEMON_VERSION = "1.1.6"
+UPLOADER_VERSION = "1.1.6"
 DAEMON_SOCKET_NAME = "ajons-uploader.sock"
 DAEMON_INFO_FILE = "daemon.json"
 DAEMON_LOCK_FILE = "daemon.lock"
@@ -585,8 +585,9 @@ class UploadQueue:
             job.last_error = "Upload incomplete"
 
 
-def _json_request_with_token(method: str, path: str, payload: dict, token: str) -> dict:
-    status, headers, body = _request(method, BASE_URL + path, payload=payload, bearer=token, timeout=30)
+async def _json_request_with_token(method: str, path: str, payload: dict, token: str) -> dict:
+    status, headers, body = await asyncio.to_thread(
+        _request, method, BASE_URL + path, payload=payload, bearer=token, timeout=30)
     if status >= 400:
         err = json.loads(body).get("error", "request rejected") if body else "request rejected"
         raise UploadError(f"Server error: {err}")
@@ -804,7 +805,7 @@ class DaemonServer:
     async def _handle_pair(self, request: dict) -> dict:
         device_name = request.get("device_name") or platform.node() or "Ajons uploader"
         try:
-            response = _json_request_with_token("POST", "/device/code", {
+            response = await _json_request_with_token("POST", "/device/code", {
                 "device_name": device_name,
                 "os": platform.platform()[:80],
             }, "")
@@ -823,7 +824,7 @@ class DaemonServer:
         while time.monotonic() < deadline:
             await asyncio.sleep(interval)
             try:
-                result = _json_request_with_token("POST", "/device/token", {"device_code": device_code}, "")
+                result = await _json_request_with_token("POST", "/device/token", {"device_code": device_code}, "")
             except UploadError as e:
                 msg = str(e)
                 if "authorization_pending" in msg:
